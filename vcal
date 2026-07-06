@@ -1,0 +1,53 @@
+#!/bin/bash
+# vcal — Variation-aware Calibration for Virtuoso netlists
+#
+# 基于深度核 GP + 贝叶斯优化的模拟/混合信号 IC 尺寸与偏置自动调参工具。
+# 目标可自定义(最大化/最小化/逼近目标值)，支持 PVT 环境角点(温度/电压/
+# 工艺角)的最差情况优化，结果可经 virtuoso-bridge 回写原理图。全离线，
+# 自动使用本机 GPU(NVIDIA CUDA / AMD ROCm)或 CPU，也可借用远程机器的 GPU。
+#
+# 用法:
+#   vcal gui                      启动图形界面
+#   vcal run <circuit.yaml> [..]  命令行跑一次优化
+#   vcal serve-gpu [--port N]     把本机 GPU 暴露给远程 vcal 借用
+#   vcal install [auto|cuda|rocm|cpu]   安装/新建 Python 环境
+set -e
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+export PYTHONPATH="$ROOT/local:$ROOT/server:$ROOT/client:$PYTHONPATH"
+
+detect_venv() {
+    local flavor
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        flavor=cuda
+    elif [ -e /dev/kfd ] && lsmod 2>/dev/null | grep -q amdgpu; then
+        flavor=rocm
+    else
+        flavor=cpu
+    fi
+    for d in "local/venv-$flavor" local/venv local/venv-rocm \
+             local/venv-cuda local/venv-cpu; do
+        if [ -x "$ROOT/$d/bin/python" ]; then
+            echo "$ROOT/$d/bin/python"; return
+        fi
+    done
+}
+
+cmd="${1:-gui}"; shift 2>/dev/null || true
+if [ "$cmd" = install ]; then
+    exec "$ROOT/local/install_env.sh" "$@"
+fi
+
+PY="$(detect_venv)"
+if [ -z "$PY" ]; then
+    echo "未找到 Python 环境。先运行:  vcal install   (自动检测硬件)"
+    exit 1
+fi
+
+case "$cmd" in
+    gui)       exec env -u LD_LIBRARY_PATH "$PY" -m optlocal gui "$@" ;;
+    run)       exec env -u LD_LIBRARY_PATH "$PY" -m optlocal run "$@" ;;
+    serve-gpu) exec env -u LD_LIBRARY_PATH "$PY" -m optclient serve-gpu "$@" ;;
+    *) echo "用法: vcal {gui | run <circuit.yaml> | serve-gpu | install}"
+       exit 1 ;;
+esac

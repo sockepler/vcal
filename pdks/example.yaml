@@ -1,0 +1,30 @@
+# PDK 定义模板 / PDK definition template / PDK 定義テンプレート
+#
+# 复制为 <your_pdk>.yaml 并填入你的模型库。电路配置用 `pdk: <name>`
+# 引用它，这样电路配置里不出现任何具体 PDK 路径 —— 换 PDK 只需改 pdk:
+# 字段或换本目录下的文件。
+#
+# Copy to <your_pdk>.yaml with your model library. Circuits reference it
+# via `pdk: <name>`, so no PDK path appears in circuit configs — swapping
+# PDKs is a one-line change.
+
+name: example180
+
+# 模型库路径。用 ${PDK_ROOT} 等环境变量，避免把绝对路径写进版本库。
+# Model library path. Use ${PDK_ROOT} so no absolute path is committed.
+model_lib: ${PDK_ROOT}/your_process/models/hspice/your_models.lib
+
+# 各工艺角 -> 该角需要 include 的 .lib section 列表(MOS/MIM/BJT...)。
+# Each process corner -> the list of .lib sections to include.
+corners:
+  tt: [tt, mim_tt, bjt_tt]
+  ss: [ss, mim_worst, bjt_ss]
+  ff: [ff, mim_best, bjt_ff]
+
+default_corner: tt
+
+# 器件模型名(可选,仅供参考/文档)。Device model names (optional, for docs).
+devices:
+  nmos: n_example
+  pmos: p_example
+  mimcap: mim_example

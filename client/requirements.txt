@@ -1,0 +1,9 @@
+# Windows client (RTX 4090). Install torch with CUDA first — see
+# ../docs/WINDOWS_SETUP.md — then the rest:
+torch>=2.3
+botorch>=0.11
+gpytorch>=1.11
+numpy
+requests
+pyyaml
+matplotlib

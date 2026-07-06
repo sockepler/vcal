@@ -1,0 +1,60 @@
+# ============ IP 保护：以下内容绝不入库 ============
+# 真实 PDK 定义(含模型库路径)。只保留脱敏模板 example.yaml
+pdks/*.yaml
+!pdks/example.yaml
+
+# 真实电路配置与网表(用户芯片 IP)：整个 circuits 目录不入库
+server/circuits/
+
+# 仿真工作目录与波形产物
+server/work/
+local/work/
+work/
+*.tr0
+*.lis
+*.st0
+*.sw0
+*.pa0
+*.ic0
+*.mt0
+*.raw/
+*.ahdlSimDB/
+tb.sp
+tb.scs
+tb_*.sp
+tb_*.scs
+dut.sp
+dut.scs
+ade_e.scs
+
+# ============ 环境 / 缓存 / 临时 ============
+local/venv*
+client/venv*
+server/venv*
+venv*
+# 运行结果与历史(含具体电路参数/路径)
+client/runs/
+*.jsonl
+# 内网特定的部署脚本(含内网 IP)
+server/setup_windows.ps1
+server/bench/
+server/make_client_zip.sh
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+
+# 含内网 IP / 具体芯片结果的文档(本地保留,不入库)
+docs/BENCHMARK.md
+docs/WINDOWS_SETUP.md
+README.zh-detail.md
+
+# 打包与基准数据
+client_pkg.zip
+*.zip
+server/bench/bench_data.json
+server/bench/result.txt
+scratchpad/
+*.png
+!docs/*.png
+local/bench_propose.py

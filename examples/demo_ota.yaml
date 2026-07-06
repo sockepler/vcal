@@ -1,0 +1,48 @@
+# 示例电路配置 — 展示 vcal 的所有能力(PDK 引用/参数/指标/环境角点/目标)。
+# 这是格式示例，非开箱即跑：把 pdk、netlist、器件名换成你自己的即可。
+#
+# Example circuit config demonstrating every vcal feature. Not run-as-is —
+# point pdk/netlist/devices at your own design.
+
+name: demo_ota
+simulator: hspice
+
+# —— PDK：引用 pdks/<name>.yaml，配置里不出现具体 PDK 路径 ——
+# 换 PDK 只改这一行(或换 pdks/ 下的文件)。设 export PDK_ROOT=/your/pdk
+pdk: example
+
+netlist: examples/demo_ota_tb.sp      # 你的网表(器件在此，vcal 改其尺寸)
+stimuli: examples/demo_ota_stim.sp    # 激励(电源/时钟/输入 + DUT 实例化)
+
+tran: {maxstep: 50p, stop: 200n}
+hspice: {mt: 2, timeout_s: 300}
+
+save: [v(vout), v(vinn), i(vvdd)]
+
+# —— 优化变量：器件尺寸。一个变量可驱动多个器件(对称对共用) ——
+params:
+  - {name: inpair_w, devices: [demo_ota/Min1, demo_ota/Min2], attr: w, lo: 5u,  hi: 40u, log: true}
+  - {name: load_w,   devices: [demo_ota/Mld1, demo_ota/Mld2], attr: w, lo: 2u,  hi: 20u, log: true}
+  - {name: tail_w,   devices: [demo_ota/Mtail],               attr: w, lo: 5u,  hi: 30u, log: true}
+
+# —— 指标：波形表达式(V/I/avg/settle_time/overshoot/enob...) ——
+metrics:
+  gain:     "abs(avg(V('vout'), 190n, 199n) - 0.9) / 0.05"
+  power_mw: "avg(-I('vvdd'), 50n, 200n) * 1.8 * 1e3"
+
+# —— 目标：maximize / minimize / target(逼近目标值±容差) ——
+objective: {metric: gain, goal: maximize}
+constraints:
+  - {metric: power_mw, max: 5.0}
+
+# —— PVT 环境角点(可选)：每个角点跑一次，优化取最差角点 ——
+# 角点可指定 temp(℃)、pdk_corner(工艺角->该角的 lib section)、
+# tb_extra(如覆盖 VDD 的 .param)。corner_worst 指定归约方式。
+corners:
+  - {name: tt_27, temp: 27, pdk_corner: tt}
+  - {name: ss_85, temp: 85, pdk_corner: ss}
+  - {name: ff_0,  temp: 0,  pdk_corner: ff}
+corner_worst: {gain: min, power_mw: max}   # 增益取最差(小)/功耗取最差(大)
+
+# —— 原理图回写目标(可选，供 GUI 回写按钮) ——
+virtuoso: {lib: YourLib, top_cell: demo_ota}
