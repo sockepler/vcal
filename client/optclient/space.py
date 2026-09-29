@@ -6,6 +6,21 @@ import numpy as np
 
 class Space:
     def __init__(self, spec_params):
+        if not isinstance(spec_params, list) or not spec_params:
+            raise ValueError("at least one parameter must be enabled")
+        names = set()
+        for p in spec_params:
+            name = p["name"]
+            if name in names:
+                raise ValueError("duplicate parameter: %s" % name)
+            names.add(name)
+            lo, hi = p["lo"], p["hi"]
+            if not all(math.isfinite(v) for v in (lo, hi)) or not lo < hi:
+                raise ValueError("param %s: bounds must be finite and lo < hi" % name)
+            if p.get("log") and lo <= 0:
+                raise ValueError("param %s: log bounds must be positive" % name)
+            if p.get("integer") and math.ceil(lo) > math.floor(hi):
+                raise ValueError("param %s: range contains no integer" % name)
         self.params = spec_params
         self.names = [p["name"] for p in spec_params]
         self.dim = len(spec_params)
@@ -35,7 +50,9 @@ class Space:
             else:
                 v = lo + u * (hi - lo)
             if p.get("integer"):
-                v = int(round(v))
+                v = min(max(int(round(v)), math.ceil(lo)), math.floor(hi))
+            else:
+                v = min(max(v, lo), hi)
             out[p["name"]] = v
         return out
 

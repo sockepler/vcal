@@ -9,12 +9,106 @@
 # 用法:
 #   vcal gui                      启动图形界面
 #   vcal run <circuit.yaml> [..]  命令行跑一次优化
+#   vcal check <circuit.yaml>    校验配置并打印 spec
 #   vcal serve-gpu [--port N]     把本机 GPU 暴露给远程 vcal 借用
 #   vcal install [auto|cuda|rocm|cpu]   安装/新建 Python 环境
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT"
-export PYTHONPATH="$ROOT/local:$ROOT/server:$ROOT/client:$PYTHONPATH"
+export PYTHONPATH="$ROOT/local:$ROOT/server:$ROOT/client${PYTHONPATH:+:$PYTHONPATH}"
+
+normalize_shell_lang() {
+    # Keep the launcher independent of Python.  The aliases mirror the
+    # Python catalog's normalization while VCAL_LANG remains documented as
+    # zh/ja/en.
+    local value="${1:-}"
+    value="${value%%.*}"
+    value="${value//_/-}"
+    value="${value,,}"
+    case "${value%%-*}" in
+        zh) printf '%s' zh ;;
+        ja) printf '%s' ja ;;
+        en) printf '%s' en ;;
+        *) return 1 ;;
+    esac
+}
+
+shell_unknown_lang() {
+    local value="$1"
+    echo "vcal: unknown language '$value' (use zh, ja, or en)" >&2
+}
+
+usage() {
+    case "$1" in
+        en)
+            cat <<'EOF'
+Usage:
+  vcal gui [--lang zh|ja|en]
+  vcal run [--lang zh|ja|en] <circuit.yaml> [options]
+  vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
+  vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+
+Use "vcal run --help" to see optimization options.
+EOF
+            ;;
+        ja)
+            cat <<'EOF'
+使い方:
+  vcal gui [--lang zh|ja|en]
+  vcal run [--lang zh|ja|en] <circuit.yaml> [オプション]
+  vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
+  vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+
+最適化オプションは「vcal run --help」を参照してください。
+EOF
+            ;;
+        *)
+            cat <<'EOF'
+用法:
+  vcal gui [--lang zh|ja|en]
+  vcal run [--lang zh|ja|en] <circuit.yaml> [选项]
+  vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
+  vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+
+使用 "vcal run --help" 查看优化选项。
+EOF
+            ;;
+    esac
+}
+
+install_usage() {
+    case "$1" in
+        en)
+            cat <<'EOF'
+Usage: vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+  auto  auto-detect NVIDIA/AMD/CPU (default)
+  cuda  install the NVIDIA CUDA environment
+  rocm  install the AMD ROCm environment
+  cpu   install the CPU environment
+EOF
+            ;;
+        ja)
+            cat <<'EOF'
+使い方: vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+  auto  NVIDIA/AMD/CPU を自動検出（既定）
+  cuda  NVIDIA CUDA 環境をインストール
+  rocm  AMD ROCm 環境をインストール
+  cpu   CPU 環境をインストール
+EOF
+            ;;
+        *)
+            cat <<'EOF'
+用法: vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
+  auto  自动检测 NVIDIA/AMD/CPU（默认）
+  cuda  安装 NVIDIA CUDA 环境
+  rocm  安装 AMD ROCm 环境
+  cpu   安装 CPU 环境
+EOF
+            ;;
+    esac
+}
 
 detect_venv() {
     local flavor
@@ -25,29 +119,126 @@ detect_venv() {
     else
         flavor=cpu
     fi
-    for d in "local/venv-$flavor" local/venv local/venv-rocm \
-             local/venv-cuda local/venv-cpu; do
-        if [ -x "$ROOT/$d/bin/python" ]; then
-            echo "$ROOT/$d/bin/python"; return
+    for d in "$ROOT/local/venv-$flavor" "$ROOT/local/venv" \
+             "$ROOT/local/venv-rocm" "$ROOT/local/venv-cuda" \
+             "$ROOT/local/venv-cpu"; do
+        if [ -x "$d/bin/python" ]; then
+            echo "$d/bin/python"; return
         fi
     done
 }
 
-cmd="${1:-gui}"; shift 2>/dev/null || true
-if [ "$cmd" = install ]; then
-    exec "$ROOT/local/install_env.sh" "$@"
+# Parse --lang in the shell so help, install, and missing-environment errors
+# work before Python is located.  Arrays preserve paths containing spaces and
+# every unrelated argument exactly as supplied.
+requested_lang="${VCAL_LANG:-}"
+explicit_lang=0
+forwarded=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --)
+            forwarded+=("$@")
+            break
+            ;;
+        --lang)
+            explicit_lang=1
+            if [ "$#" -lt 2 ]; then
+                shell_unknown_lang ""
+                exit 2
+            fi
+            requested_lang="$2"
+            shift 2
+            ;;
+        --lang=*)
+            explicit_lang=1
+            requested_lang="${1#--lang=}"
+            shift
+            ;;
+        *)
+            forwarded+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$requested_lang" ] && [ "$explicit_lang" -eq 1 ]; then
+    shell_unknown_lang ""
+    exit 2
+fi
+if [ -z "$requested_lang" ]; then
+    requested_lang=zh
+fi
+if ! shell_lang=$(normalize_shell_lang "$requested_lang"); then
+    shell_unknown_lang "$requested_lang"
+    exit 2
 fi
 
-PY="$(detect_venv)"
+cmd="${forwarded[0]:-gui}"
+if [ "${#forwarded[@]}" -gt 0 ]; then
+    forwarded=("${forwarded[@]:1}")
+else
+    forwarded=()
+fi
+
+case "$cmd" in
+    -h|--help|help)
+        usage "$shell_lang"
+        exit 0
+        ;;
+    install)
+        case "${forwarded[0]:-}" in
+            -h|--help|help)
+                install_usage "$shell_lang"
+                exit 0
+                ;;
+        esac
+        ;;
+    gui|run|check|serve-gpu)
+        ;;
+    *)
+        usage "$shell_lang" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$cmd" = install ]; then
+    # install_env.sh has no language option; consume --lang above and preserve
+    # the install flavor and all remaining arguments verbatim.
+    exec "$ROOT/local/install_env.sh" "${forwarded[@]}"
+fi
+
+if [ -n "${OPTLOCAL_PYTHON:-}" ]; then
+    if [ ! -x "$OPTLOCAL_PYTHON" ]; then
+        case "$shell_lang" in
+            en) echo "OPTLOCAL_PYTHON is not executable: $OPTLOCAL_PYTHON" >&2 ;;
+            ja) echo "指定された OPTLOCAL_PYTHON は実行できません: $OPTLOCAL_PYTHON" >&2 ;;
+            *) echo "指定的 OPTLOCAL_PYTHON 不可执行: $OPTLOCAL_PYTHON" >&2 ;;
+        esac
+        exit 1
+    fi
+    PY="$OPTLOCAL_PYTHON"
+else
+    PY="$(detect_venv)"
+fi
 if [ -z "$PY" ]; then
-    echo "未找到 Python 环境。先运行:  vcal install   (自动检测硬件)"
+    case "$shell_lang" in
+        en) echo "Python environment not found. Run:  vcal install   (auto-detect hardware)" >&2 ;;
+        ja) echo "Python 環境が見つかりません。先に vcal install を実行してください（ハードウェア自動検出）。" >&2 ;;
+        *) echo "未找到 Python 环境。先运行:  vcal install   (自动检测硬件)" >&2 ;;
+    esac
     exit 1
 fi
 
 case "$cmd" in
-    gui)       exec env -u LD_LIBRARY_PATH "$PY" -m optlocal gui "$@" ;;
-    run)       exec env -u LD_LIBRARY_PATH "$PY" -m optlocal run "$@" ;;
-    serve-gpu) exec env -u LD_LIBRARY_PATH "$PY" -m optclient serve-gpu "$@" ;;
-    *) echo "用法: vcal {gui | run <circuit.yaml> | serve-gpu | install}"
-       exit 1 ;;
+    gui|run|check)
+        if [ "$explicit_lang" -eq 1 ]; then
+            exec env -u LD_LIBRARY_PATH "$PY" -m optlocal --lang "$shell_lang" "$cmd" "${forwarded[@]}"
+        fi
+        exec env -u LD_LIBRARY_PATH "$PY" -m optlocal "$cmd" "${forwarded[@]}"
+        ;;
+    serve-gpu)
+        # optclient does not understand --lang.  It is intentionally consumed
+        # by this launcher and never reaches the downstream command.
+        exec env -u LD_LIBRARY_PATH "$PY" -m optclient serve-gpu "${forwarded[@]}"
+        ;;
 esac

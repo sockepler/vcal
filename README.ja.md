@@ -52,11 +52,43 @@ Python ≥ 3.10 と SPICE シミュレータ(HSpice/Spectre)が PATH に必要�
 ```bash
 ./vcal gui                            # GUI
 ./vcal run examples/demo_ota.yaml --budget 100 --batch 4
+./vcal check examples/demo_ota.yaml         # 設定のみ検証（シミュレーションなし）
+./vcal check examples/demo_ota.yaml --json  # 機械可読な spec
 ./vcal serve-gpu --port 8494          # GPU マシンで GPU を貸し出す
 ```
 
-主なオプション：`--budget N`(総評価数)、`--batch q`(並列提案数)、
-`--device auto|cuda|cpu`、`--remote-gpu URL`、`--resume`(履歴から再開)。
+主なオプション：`--budget N`(総評価数、N を超えない)、`--batch q`(並列提案数)、
+`--device auto|cuda|rocm|cpu`、`--remote-gpu URL`、`--resume`(既定で履歴から再開)、
+または `--no-resume`(履歴を無視)。
+
+`check` は設定の構造、参照ファイル、素子、パラメータ範囲、指標の参照だけを
+検証します。波形式の構文や実際のシミュレーションは検証しません。
+
+### 表示言語
+
+GUI 上部の言語プルダウンで中国語・日本語・英語を即時に切り替えられます。
+選択した言語は直ちに画面へ反映され、次回起動用の設定として保存されます。
+CLI ではサブコマンドの前後に指定でき、`./vcal --lang ja gui` や
+`./vcal gui --lang en` のように使います。`VCAL_LANG=ja ./vcal gui` も利用
+できます。優先順位は明示した `--lang`、`VCAL_LANG`、保存済み GUI 設定、最後に
+中国語です。翻訳対象は画面と CLI メッセージだけで、Spectre など第三者のログ、
+ユーザー定義の metrics 名、ネットリスト識別子は原文のまま保持されます。
+トップレベルのヘルプと `install --help` はシェルが直接出力し、`--lang` または
+`VCAL_LANG` を使用します。保存済みの GUI 言語設定は読み込みません。
+
+## GUI の反復グラフ
+
+GUI のグラフは横軸が評価回数で、縦軸のプルダウンには設定されたすべての
+`metrics` が表示されます。青は制約を満たす点、橙は制約違反、赤い×は
+シミュレーション失敗を表し、失敗点には架空の y 値を入れません。最良の可行
+トレンドは目的指標だけに表示されます。点をクリックするとその評価のパラメータ、
+指標、エラーを確認でき、ズーム、パン、PNG/CSV 出力を利用できます。
+
+GUI の結果は既定で YAML の隣の `../work/<name>/gui_run/` に保存され、CLI は
+同じ回路の `cli_run/` を使います。`best.json`（成功した評価がある場合だけ生成、
+`feasible` は制約達成を示す）、`summary.json`、`state.json`、`history.csv` が
+自動生成されます。`vcal run --resume` は既存記録を復元し、同じパラメータ点の
+シミュレーションを繰り返しません。
 
 ## 回路の定義
 
@@ -66,7 +98,7 @@ Python ≥ 3.10 と SPICE シミュレータ(HSpice/Spectre)が PATH に必要�
 |------|------|
 | `pdk` | `pdks/<name>.yaml` の名前（回路ファイルに PDK パスを書かない） |
 | `netlist` / `stimuli` | 素子ネットリスト + 励起デック |
-| `params` | 最適化変数：`devices`・`attr`(`w`/`l`/`mr`/`value`)・`lo`/`hi`/`log`/`integer`。1 変数で複数素子を駆動可（対称ペアで共有） |
+| `params` | 最適化変数：`devices`・`attr`(`w`/`l`/`mr`/`value`)・`lo`/`hi`/`log`/`integer`。`enabled: false` で変数を無効化できます。1 変数で複数素子を駆動可（対称ペアで共有） |
 | `metrics` | 名前付き波形式。工学表記(`90n`)、`m['...']` で前の指標を参照可 |
 | `objective` | `{metric, goal: maximize/minimize/target, target, tol, weight}` |
 | `constraints` | `[{metric, max/min}]` |
@@ -74,6 +106,9 @@ Python ≥ 3.10 と SPICE シミュレータ(HSpice/Spectre)が PATH に必要�
 
 MOS の `w` を変更するとレイアウト由来パラメータ(as/ad/ps/pd…)も自動
 スケール。回路図編集と同じ意味論です。
+トップレベルの `fixed` には `{パラメータ名: 値}` を指定して変数を固定できます。
+設定内の相対パスはまず YAML ファイルを基準に解決し、旧来のリポジトリルート基準
+の相対パスも互換のため利用できます。
 
 ## PDK 設定
 
@@ -85,7 +120,7 @@ PDK は `pdks/<name>.yaml` で定義します（[`pdks/example.yaml`](pdks/examp
 ## 構成
 
 ```
-vcal                    統合ランチャ (gui / run / serve-gpu / install)
+vcal                    統合ランチャ (gui / run / check / serve-gpu / install)
 server/optserver/       ネットリスト書換 + シミュレーション + 指標抽出
 client/optclient/       BoTorch 最適化器 + リモート GPU 計算サーバ
 local/optlocal/         オフラインエンジン + PyQt5 GUI + 回路図書戻し

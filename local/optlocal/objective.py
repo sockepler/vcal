@@ -18,22 +18,43 @@ YAML forms accepted:
 A target term with `tol` ALSO produces an implicit constraint
 |m - target| <= tol (checked for the feasibility report).
 """
+import math
+
+
+def _finite(value, label):
+    if isinstance(value, bool):
+        raise ValueError("%s must be a finite number" % label)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a finite number" % label) from None
+    if not math.isfinite(v):
+        raise ValueError("%s must be a finite number" % label)
+    return v
 
 
 class Term:
     def __init__(self, cfg):
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("metric"), str):
+            raise ValueError("objective term must contain a metric name")
         self.metric = cfg["metric"]
         self.goal = cfg.get("goal", "maximize")
         if self.goal not in ("maximize", "minimize", "target"):
             raise ValueError("goal must be maximize/minimize/target")
-        self.target = float(cfg.get("target", 0.0))
-        self.weight = float(cfg.get("weight", 1.0))
-        self.tol = cfg.get("tol", None)
+        if self.goal == "target" and "target" not in cfg:
+            raise ValueError("target objective requires target")
+        self.target = _finite(cfg.get("target", 0.0), "target")
+        self.weight = _finite(cfg.get("weight", 1.0), "weight")
+        self.tol = _finite(cfg["tol"], "tol") if cfg.get("tol") is not None else None
+        if self.weight < 0 or (self.tol is not None and self.tol < 0):
+            raise ValueError("weight and tol must be nonnegative")
         scale = cfg.get("scale")
         if scale is None:
             scale = abs(self.target) if (self.goal == "target"
                                          and self.target != 0) else 1.0
-        self.scale = max(abs(float(scale)), 1e-12)
+        self.scale = _finite(scale, "scale")
+        if self.scale <= 0:
+            raise ValueError("scale must be positive")
 
     def value(self, metrics):
         m = float(metrics[self.metric])
@@ -71,6 +92,8 @@ class Objective:
     def __init__(self, cfg):
         if isinstance(cfg, dict):
             cfg = [cfg]
+        if not isinstance(cfg, list):
+            raise ValueError("objective must be a mapping or list of terms")
         self.terms = [Term(t) for t in cfg]
         if not self.terms:
             raise ValueError("empty objective")

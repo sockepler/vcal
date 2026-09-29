@@ -24,7 +24,8 @@ class TurboState:
         self.restarts = 0
 
     def update(self, batch_best):
-        if batch_best > self.best_value + 1e-4 * abs(self.best_value):
+        if math.isfinite(batch_best) and (not math.isfinite(self.best_value) or
+                batch_best > self.best_value + 1e-4 * abs(self.best_value)):
             self.success += 1
             self.failure = 0
         else:

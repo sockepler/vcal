@@ -14,6 +14,7 @@ A circuit YAML declares:
 """
 import copy
 import glob
+import math
 import os
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from . import psfread
 from . import tr0read
 from .hspice_netlist import HspiceNetlist
 from .netlist import Netlist, parse_num
+from .validation import number, resolve_file, validate_config
 
 SPECTRE = os.environ.get("OPTSERVER_SPECTRE", "spectre")
 HSPICE = os.environ.get("OPTSERVER_HSPICE", "hspice")
@@ -33,9 +35,13 @@ HSPICE = os.environ.get("OPTSERVER_HSPICE", "hspice")
 
 class Circuit:
     def __init__(self, yaml_path):
-        self.yaml_path = yaml_path
-        with open(yaml_path) as f:
+        self.yaml_path = os.path.abspath(os.path.expanduser(os.fspath(yaml_path)))
+        with open(self.yaml_path) as f:
             self.cfg = yaml.safe_load(f)
+        validate_config(self.cfg)
+        for key in ("netlist", "stimuli"):
+            if self.cfg.get(key):
+                self.cfg[key] = resolve_file(self.cfg[key], self.yaml_path, key)
         self.name = self.cfg["name"]
         self.simulator = self.cfg.get("simulator", "spectre")
         self.params = self.cfg["params"]          # list of dicts
@@ -46,6 +52,36 @@ class Circuit:
         self._pdk = self._load_pdk()
         base = self._load_netlist()               # validate at load time
         self._nominal = self._read_nominal(base)
+        self._validate_devices(base)
+        self.fixed = dict(self.cfg.get("fixed", {}))
+        for p in self.params:
+            if not p.get("enabled", True) and p["name"] not in self.fixed:
+                self.fixed[p["name"]] = self._nominal[p["name"]]
+        known = {p["name"]: p for p in self.params}
+        for name, value in self.fixed.items():
+            if name not in known:
+                raise ValueError("fixed references unknown parameter: " + name)
+            p = known[name]
+            v = number(value, "fixed." + name)
+            if not parse_num(p["lo"]) <= v <= parse_num(p["hi"]):
+                raise ValueError("fixed.%s is outside parameter bounds" % name)
+            if p.get("integer") and not v.is_integer():
+                raise ValueError("fixed.%s must be an integer" % name)
+            self.fixed[name] = v
+        # Verify model paths and every selected process corner before simulation.
+        for corner in self.cfg.get("corners") or [{}]:
+            for lib in corner.get("libs") or self._libs_for(corner.get("pdk_corner")):
+                lib["path"] = resolve_file(lib["path"], self.yaml_path, "model library")
+
+    def _validate_devices(self, nl):
+        errors = []
+        for p in self.params:
+            for devspec in p["devices"]:
+                scope, dev = self._split_dev(devspec)
+                if nl.instance(scope, dev) is None:
+                    errors.append("param %s: device %s not found" % (p["name"], devspec))
+        if errors:
+            raise ValueError("\n".join(errors))
 
     # ---------- PDK (可更换 / 与工具解耦) ----------
     def _load_pdk(self):
@@ -74,8 +110,13 @@ class Circuit:
         if self._pdk:
             lib = os.path.expandvars(self._pdk["model_lib"])
             corner = pdk_corner or self._pdk.get("default_corner", "tt")
+            if corner not in self._pdk.get("corners", {}):
+                raise ValueError("unknown PDK corner: %s" % corner)
             secs = self._pdk["corners"][corner]
-            return [{"path": lib, "section": s} for s in secs]
+            if not isinstance(secs, list) or not secs or not all(isinstance(s, str) and s for s in secs):
+                raise ValueError("PDK corner sections must be a nonempty list: %s" % corner)
+            return [{"path": resolve_file(lib, self.yaml_path, "PDK model library"),
+                     "section": s} for s in secs]
         return self.cfg.get("libs", [])
 
     def _load_netlist(self):
@@ -112,6 +153,7 @@ class Circuit:
                  "hi": float(parse_num(p["hi"])),
                  "log": bool(p.get("log", False)),
                  "integer": bool(p.get("integer", False)),
+                 "enabled": bool(p.get("enabled", True)) and p["name"] not in self.fixed,
                  "nominal": self._nominal.get(p["name"]),
                  "attr": p["attr"],
                  "devices": p["devices"]}
@@ -120,6 +162,7 @@ class Circuit:
             "metrics": list(self.metrics.keys()),
             "objective": self.cfg["objective"],
             "constraints": self.cfg.get("constraints", []),
+            "fixed": self.fixed,
         }
 
     # ---------- evaluation ----------
@@ -130,10 +173,11 @@ class Circuit:
             name = p["name"]
             if name not in values:
                 continue
-            v = float(values[name])
+            v = number(values[name], "param " + name)
             v = min(max(v, parse_num(p["lo"])), parse_num(p["hi"]))
             if p.get("integer"):
-                v = int(round(v))
+                v = min(max(int(round(v)), math.ceil(parse_num(p["lo"]))),
+                        math.floor(parse_num(p["hi"])))
             for devspec in p["devices"]:
                 scope, dev = self._split_dev(devspec)
                 inst = nl.instance(scope, dev)   # re-fetch: edits reparse
@@ -197,6 +241,9 @@ class Circuit:
                   "simulator lang=spectre"]
             if temp is not None:
                 tb.append("tempOpt options temp=%g" % temp)
+            for lib in libs:
+                section = " section=" + lib["section"] if lib.get("section") else ""
+                tb.append('include "%s"%s' % (lib["path"], section))
             tb += ['include "%s"' % self.cfg["stimuli"],
                    'include "dut.scs"']
             tb += tb_extra
@@ -211,6 +258,7 @@ class Circuit:
         """Run one point. Returns dict with ok/metrics/error/sim_s."""
         os.makedirs(workdir, exist_ok=True)
         t0 = time.time()
+        values = {**self.fixed, **values}
         result = {"params": values, "ok": False, "metrics": None,
                   "error": None, "workdir": workdir}
         corners = self.cfg.get("corners") or [{"name": "nominal"}]
@@ -251,7 +299,7 @@ class Circuit:
                 result["metrics_by_corner"] = by_corner
             result["ok"] = True
         except subprocess.TimeoutExpired:
-            result["error"] = "spectre timeout"
+            result["error"] = self.simulator + " timeout"
         except Exception as e:
             result["error"] = str(e)
         result["sim_s"] = round(time.time() - t0, 2)

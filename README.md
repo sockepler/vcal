@@ -45,11 +45,40 @@ export PDK_ROOT=/path/to/your/pdk     # 供 pdks/*.yaml 引用
 ```bash
 ./vcal gui                            # 图形界面
 ./vcal run examples/demo_ota.yaml --budget 100 --batch 4
+./vcal check examples/demo_ota.yaml         # 只校验配置，不仿真
+./vcal check examples/demo_ota.yaml --json  # 输出机器可读 spec
 ./vcal serve-gpu --port 8494          # 在 GPU 机器上，把 GPU 借出
 ```
 
-CLI 选项：`--budget N` 总评估数、`--batch q` 并行提案、
-`--device auto|cuda|cpu`、`--remote-gpu URL`、`--resume`(从历史续跑)。
+CLI 选项：`--budget N` 总评估数（不会超过 N）、`--batch q` 并行提案、
+`--device auto|cuda|rocm|cpu`、`--remote-gpu URL`、`--resume`(默认从历史续跑)
+或 `--no-resume`（忽略历史）。
+
+`check` 只检查配置结构、引用文件、器件、参数范围和指标引用，不检查波形
+表达式语法，也不运行真实仿真。
+
+### 界面语言
+
+GUI 顶部的语言下拉框可即时切换中文、日文或英文；选择语言后会立即刷新界面，
+并保存为下次启动的偏好。CLI 可在子命令前或后指定语言，例如
+`./vcal --lang ja gui`、`./vcal gui --lang en`，也可用
+`VCAL_LANG=ja ./vcal gui`。语言优先级为显式 `--lang`、`VCAL_LANG`、已保存的
+GUI 偏好，最后回退到中文。翻译只作用于界面和 CLI 文案；Spectre 等第三方日志、
+用户定义的 metrics 名称以及网表标识符保持原文。
+顶层帮助和 `install --help` 由 shell 直接输出，使用 `--lang` 或 `VCAL_LANG`，
+不读取保存的 GUI 语言偏好。
+
+## GUI 迭代图
+
+GUI 的迭代图横轴是评估次数，指标下拉框包含配置中的全部 `metrics`。蓝色点
+表示满足约束，橙色点表示违反约束，红色叉表示仿真失败；失败点不填入虚假
+的纵坐标值。最佳可行趋势线只用于目标指标。点击点可查看该次评估的参数、
+指标和错误信息，图表支持缩放、平移以及 PNG/CSV 导出。
+
+GUI 默认把结果写到 YAML 旁的 `../work/<name>/gui_run/`；CLI 使用同一电路的
+`cli_run/` 子目录。目录中会自动生成 `best.json`（存在成功评估时才生成，
+`feasible` 表示是否满足约束）、`summary.json`、`state.json` 和
+`history.csv`。`vcal run --resume` 会恢复已有记录，并跳过重复参数点的仿真。
 
 ## 定义一个电路
 
@@ -59,13 +88,15 @@ CLI 选项：`--budget N` 总评估数、`--batch q` 并行提案、
 |------|------|
 | `pdk` | `pdks/<name>.yaml` 的名字（电路文件里不含 PDK 路径） |
 | `netlist` / `stimuli` | 你的器件网表 + 激励 deck |
-| `params` | 优化变量：`devices`、`attr`(`w`/`l`/`mr`/`value`)、`lo`/`hi`/`log`/`integer`。一个变量可驱动多个器件(对称对共用) |
+| `params` | 优化变量：`devices`、`attr`(`w`/`l`/`mr`/`value`)、`lo`/`hi`/`log`/`integer`；可用 `enabled: false` 禁用某个变量。一个变量可驱动多个器件(对称对共用) |
 | `metrics` | 波形表达式，支持工程记数(`90n`)、`m['...']` 引用前面的指标 |
 | `objective` | `{metric, goal: maximize/minimize/target, target, tol, weight}` |
 | `constraints` | `[{metric, max/min}]` |
 | `corners` | PVT 列表：`{name, temp, pdk_corner, tb_extra}` + `corner_worst` 归约 |
 
 改 MOS 的 `w` 时版图衍生参数(as/ad/ps/pd…)自动同步缩放，语义等同改原理图。
+顶层 `fixed` 可用 `{参数名: 数值}` 固定变量。配置中的相对路径优先相对该
+YAML 文件解析，同时兼容旧的相对仓库根目录路径。
 
 ## PDK 配置
 
@@ -77,7 +108,7 @@ PDK 定义在 `pdks/<name>.yaml`（见 [`pdks/example.yaml`](pdks/example.yaml)�
 ## 目录结构
 
 ```
-vcal                    统一入口 (gui / run / serve-gpu / install)
+vcal                    统一入口 (gui / run / check / serve-gpu / install)
 server/optserver/       网表改写 + 仿真 + 指标提取
 client/optclient/       BoTorch 优化器 + 远程 GPU 计算服务
 local/optlocal/         离线引擎 + PyQt5 GUI + 原理图回写

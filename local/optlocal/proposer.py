@@ -9,6 +9,8 @@ import requests
 
 from optclient.propose import propose_candidates
 
+from .i18n import tr
+
 
 class LocalProposer:
     def __init__(self, device, log=print):
@@ -57,6 +59,6 @@ class RemoteProposer:
             return (np.asarray(out["candidates"], float),
                     bool(out["used_dkl"]))
         except Exception as e:
-            self._log("远程GPU失败(%s)，本轮回退本地计算" % e)
+            self._log(tr("远程GPU失败(%s)，本轮回退本地计算") % e)
             return self._fallback.propose(X, y, C, batch, tr_length,
                                           center, use_dkl, dkl_after)
