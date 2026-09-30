@@ -16,6 +16,12 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$ROOT/local:$ROOT/server:$ROOT/client${PYTHONPATH:+:$PYTHONPATH}"
 
+# Python/Qt must not load the EDA toolchain's library overrides. Preserve
+# them separately for Spectre, HSpice and PSF child processes.
+if [ "${VCAL_SIM_LD_LIBRARY_PATH+x}" != x ] && [ "${LD_LIBRARY_PATH+x}" = x ]; then
+    export VCAL_SIM_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+fi
+
 normalize_shell_lang() {
     # Keep the launcher independent of Python.  The aliases mirror the
     # Python catalog's normalization while VCAL_LANG remains documented as

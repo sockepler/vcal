@@ -34,14 +34,34 @@ def validate_config(cfg):
     if simulator == "spectre":
         check(isinstance(cfg.get("stimuli"), str) and bool(cfg.get("stimuli")),
               "stimuli must be a file path for Spectre")
+    analyses = [name for name in ("tran", "dc") if name in cfg]
+    check(bool(analyses), "at least one analysis (tran or dc) must be configured")
     tran = cfg.get("tran")
-    if not isinstance(tran, dict):
+    if "tran" in cfg and not isinstance(tran, dict):
         errors.append("tran must contain stop and maxstep")
-    else:
+    elif isinstance(tran, dict):
         for key in ("stop", "maxstep"):
             try:
                 check(number(tran.get(key), "tran." + key) > 0,
                       "tran.%s must be positive" % key)
+            except ValueError as exc:
+                errors.append(str(exc))
+    if "dc" in cfg:
+        dc = cfg["dc"]
+        check(simulator == "spectre", "dc sweeps currently require Spectre")
+        if not isinstance(dc, dict):
+            errors.append("dc must contain source, start, stop and step")
+        else:
+            source = dc.get("source")
+            check(isinstance(source, str) and re.fullmatch(r"[A-Za-z_][\w.]*", source) is not None,
+                  "dc.source must be a source instance name")
+            check(not (set(dc) - {"source", "start", "stop", "step"}),
+                  "dc supports only source, start, stop and step")
+            try:
+                start, stop, step = [number(dc.get(key), "dc." + key) for key in ("start", "stop", "step")]
+                check(start != stop and step != 0 and (stop-start)*step > 0,
+                      "dc step must be nonzero and point from start toward stop")
+                check(abs(step) <= abs(stop-start), "dc sweep requires at least two points")
             except ValueError as exc:
                 errors.append(str(exc))
     check(isinstance(cfg.get("save"), list) and bool(cfg.get("save"))
@@ -118,8 +138,11 @@ def validate_config(cfg):
         errors.append("metrics must be a nonempty mapping")
         metrics = {}
     else:
-        check(all(isinstance(k, str) and isinstance(v, str) and v.strip()
-                  for k, v in metrics.items()), "metrics must map names to expressions")
+        try:
+            from .metricexpr import validate_metric_definitions
+            validate_metric_definitions(metrics, analyses)
+        except ValueError as exc:
+            errors.append(str(exc))
     obj = cfg.get("objective")
     terms = [obj] if isinstance(obj, dict) else obj
     if not isinstance(terms, list) or not terms:

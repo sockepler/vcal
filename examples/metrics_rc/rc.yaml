@@ -1,0 +1,23 @@
+# Reproducible tran + DC measurement/optimization example, no PDK required.
+# This handwritten analytic fixture does not represent a user circuit.
+name: metrics_rc_reference
+simulator: spectre
+netlist: dut.scs
+stimuli: stimuli.scs
+tran: {stop: 10u, maxstep: 10n}
+dc: {source: VIN, start: -0.01, stop: 0.01, step: 0.001}
+spectre: {engine: '', mt: 1, timeout_s: 60}
+tb_extra: ['accuracy options reltol=1e-6 vabstol=1e-9 iabstol=1e-12']
+save: [in, out, 'VIN:p']
+keep_raw: true
+params:
+  - {name: resistance, devices: [R1], attr: r, lo: 500, hi: 2000}
+metrics:
+  # m['gain'] is evaluated first even though it is declared below.
+  settle_s: "settle_time(V('out'), start=1u, end=10u, final=m['gain'], initial=0, tol=.01, hold=1u)"
+  rise_s: "rise_time(V('out'), start=1u, end=10u, initial=0, final=m['gain'])"
+  gain: {analysis: dc, expr: "dc_gain(V('out'), V('in'), at=0)"}
+  offset_v: {analysis: dc, expr: "dc_offset(V('out'), V('in'))"}
+objective: {metric: settle_s, goal: minimize, scale: 1e-6}
+constraints: [{metric: gain, min: 0.49}]
+corner_worst: {settle_s: max, rise_s: max, gain: min}

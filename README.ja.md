@@ -61,44 +61,52 @@ Python ≥ 3.10 と SPICE シミュレータ(HSpice/Spectre)が PATH に必要�
 `--device auto|cuda|rocm|cpu`、`--remote-gpu URL`、`--resume`(既定で履歴から再開)、
 または `--no-resume`(履歴を無視)。
 
-`check` は設定の構造、参照ファイル、素子、パラメータ範囲、指標の参照だけを
-検証します。波形式の構文や実際のシミュレーションは検証しません。
+`check` は設定の構造、参照ファイル、素子、パラメータ範囲、指標式の構文、
+シンボル、依存関係、analysis の選択を検証します。実際のシミュレーションは
+実行せず、保存信号の存在は指標評価時に確認します。
 
-## OTA ワークフロー：gm/Id、scope、レビュー
+## 汎用 Circuit metrics
 
-全体の手順は [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md) を参照してください。
-GUI の gm/Id パネルは既存の NPZ/CSV LUT を読み込みます。リポジトリの合成テーブルは
-フロー確認用で、PDK データを含みません。
+GUI の **Circuit metrics** ページでは、tran の stop/maxstep、Spectre DC の
+source/start/stop/step、指標式を編集できます。settling time、DC gain、FFT、
+DNL/INL、電力、エネルギーの 24 個のテンプレートを検証して適用すると、目標と
+制約の候補に追加されます。目標または制約が参照している指標は直接削除できません。
+tran と dc は単独でも併用でも設定できます。指標は従来の文字列、または
+`{analysis: dc, expr: "..."}` 形式を使用できます。完全な署名、
+単位、境界条件は [`docs/METRICS.md`](docs/METRICS.md) を参照してください。
+設定を適用して目標・制約へ進む手順は [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md)
+にまとめています。
 
-```bash
-./vcal gmid examples/gmid_demo.csv \
-  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
-```
+~~~yaml
+tran: {stop: 200n, maxstep: 50p}
+dc: {source: VBIAS, start: 0, stop: 1.8, step: 10m}
+metrics:
+  gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
+  settle: {analysis: tran, expr: "settle_time(V('out'), start=0, end=200n, final=1.0)"}
+  sndr: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0)"
+constraints:
+  - {metric: settle, max: 20n}
+~~~
 
-CLI ではパラメータのグループ確認、1 つの sub-cell scope の実行、履歴のオフライン
-レビューができます。
+settle_time はデフォルトで未整定を失敗にします。有限の窓長を残す場合は
+`on_unsettled: window` を明示し、`settled(...) == 1` を制約に加えてください。
+FFT の fund は Hz ではなく bin です。`adc_static(method='histogram')` は
+完全な一様 ramp の code-density 用、`adc_transitions` は完全な遷移境界用です。
+`decode_bits` は `np.column_stack` で作る `(samples, bits)` 波形を受け取ります。
 
-```bash
-./vcal scopes <circuit.yaml> --json
-./vcal run <circuit.yaml> --scope <scope-name> \
-  --stagnation-rounds 6 --initial-points points.json --budget 100
-./vcal review <history.jsonl> --config <circuit.yaml> --json
-```
+## 任意利用の gm/Id と scope 補助
 
-`--scope` を省略すると、すべての有効なパラメータを最適化します。scope を指定すると、
-`devices` の全エントリがその scope に属するパラメータだけが有効になり、共有パラメータと
-選択していない scope のパラメータには、CLI では設定の固定値／公称値、GUI では初期値欄の
-値を使います。`--initial-points` は物理 SI
-値のマッピングを並べた JSON リスト、`--stagnation-rounds` は全体探索をキューに入れる
-までの停滞ラウンド数（0 以上）です。GUI の流れは、gm/Id LUT を開く → 幅/長さの対応
-パラメータを選ぶ → 計算結果を初期値として適用 → scope を選ぶ → 既存設定で最適化を開始
-→ `review` で履歴を確認、です。
+gm/Id パネルは NPZ/CSV LUT をオフラインで読み込み、サイズ提案を初期値に適用
+できます。scope は 1 つの sub-cell 範囲を確認する補助機能です。合成デモには
+PDK データが含まれません。
 
-`params.devices` の `scope/instance` は subcircuit master 内の素子を指します。その master
-を変更すると、同じ master の全インスタンスに影響します。scope の選択で新しい刺激や
-テストベンチは生成されず、シミュレーションは設定済みのネットリストと既存の testbench
-を使います。このバージョンは PDK LUT や OTA AC テストベンチを自動生成しません。合成 LUT
-とここでの例は、実際の Spectre テストや性能を示すものではありません。
+~~~bash
+./vcal gmid examples/gmid_demo.csv --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+~~~
+
+これらの補助機能は PDK LUT、OTA AC テストベンチ、新しい刺激を自動生成しません。
+現在の優先順位は汎用 tran/DC、FFT、ADC 静特性、電力・エネルギー測定です。OTA
+固有のテスト基盤は将来の任意拡張です。
 
 ### 表示言語
 

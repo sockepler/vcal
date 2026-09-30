@@ -281,6 +281,7 @@ class MainWindow(QMainWindow):
             if get_language() == "ja" else
             ["Noto Sans CJK SC", "Noto Sans CJK JP", "DejaVu Sans"])
         self.gmid_panel.retranslate_ui()
+        self.metrics_panel.retranslate_ui()
         self._update_scope_view()
         self._render_review()
         # Keep a user's zoom/pan while refreshing labels on an existing plot.
@@ -469,6 +470,13 @@ class MainWindow(QMainWindow):
         self.txt_review.setReadOnly(True)
         review_layout.addWidget(self.txt_review)
         self._tab(tabs, review_widget, "Iteration review")
+        from .metrics_gui import MetricsPanel
+        self.metrics_panel = MetricsPanel()
+        self.metrics_panel.proposed.connect(self._apply_metric_settings)
+        metrics_scroll = QScrollArea()
+        metrics_scroll.setWidgetResizable(True)
+        metrics_scroll.setWidget(self.metrics_panel)
+        self._tab(tabs, metrics_scroll, "Circuit metrics")
         self.tabs = tabs
 
         # ---- right side ----
@@ -580,6 +588,7 @@ class MainWindow(QMainWindow):
         self.cmb_scope.blockSignals(False)
         self._update_scope_view()
         self.gmid_panel.set_parameters(spec["params"])
+        self.metrics_panel.set_config(self.cfg)
         self.spin_stagnation.setValue(spec.get("optimizer", {}).get("stagnation_rounds", 6))
         self._fill_objective(spec["objective"])
         self._fill_constraints(spec.get("constraints", []))
@@ -677,7 +686,11 @@ class MainWindow(QMainWindow):
     def _fill_constraints(self, cons):
         self.tbl_cons.setRowCount(0)
         for c in cons:
-            self.add_cons_row(c)
+            if "target" in c and "tol" in c:
+                self.add_cons_row({"metric": c["metric"], "min": c["target"] - c["tol"]})
+                self.add_cons_row({"metric": c["metric"], "max": c["target"] + c["tol"]})
+            else:
+                self.add_cons_row(c)
 
     # ---- collect edited state ----
     @staticmethod
@@ -778,6 +791,58 @@ class MainWindow(QMainWindow):
         # Validate the complete proposal before changing any table cell.
         for row, value in updates:
             self.tbl_params.item(row, 9).setText(fmt_num(value))
+
+    def _apply_metric_settings(self, proposal):
+        if self._has_active_task():
+            return
+        from optserver.validation import validate_config
+        try:
+            if self.evaluator is None or self.cfg is None:
+                raise ValueError(tr("先打开电路配置 YAML"))
+            candidate = copy.deepcopy(self.cfg)
+            for analysis in ("tran", "dc"):
+                candidate.pop(analysis, None)
+            candidate.update(copy.deepcopy(proposal["analyses"]))
+            candidate["metrics"] = copy.deepcopy(proposal["metrics"])
+            candidate["save"] = list(proposal.get("save", candidate["save"]))
+            # Validate current objective edits too: deleting a referenced
+            # measurement must not silently select a different objective.
+            candidate["objective"] = self._collect_objective()
+            candidate["constraints"] = self._collect_constraints()
+            validate_config(candidate)
+        except (ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, tr("Invalid measurements"), str(exc))
+            return
+        previous = self.cmb_metric.currentText()
+        self.cfg.clear()
+        self.cfg.update(candidate)
+        self.evaluator.ckt.metrics = self.cfg["metrics"]
+        self.metric_names = list(self.cfg["metrics"])
+        self.metrics_panel.set_config(self.cfg)
+        self.cmb_metric.blockSignals(True)
+        self.cmb_metric.clear()
+        self.cmb_metric.addItems(self.metric_names)
+        if previous in self.metric_names:
+            self.cmb_metric.setCurrentText(previous)
+        self.cmb_metric.blockSignals(False)
+        self._fill_objective(candidate["objective"])
+        self._fill_constraints(candidate["constraints"])
+        self.worker = self.nw = None
+        self._last_summary = None
+        self._objective_snapshot = []
+        self._constraints_snapshot = []
+        self._records = []
+        self._record_states = []
+        self.plot_data = []
+        self._pick_points = {}
+        self._selected_point = None
+        self._review = None
+        self.lbl_point.setText(tr("点击图中点查看 trial、指标和参数"))
+        self._show_no_best()
+        self._set_status("状态：空闲")
+        self._redraw()
+        self._render_review()
+        self.log(tr("Measurements applied. History with different measurement definitions is excluded. Save the configuration to keep these changes."))
 
     def _apply_gmid_result(self, proposal):
         if self._has_active_task():
@@ -1445,7 +1510,9 @@ class MainWindow(QMainWindow):
             return list(self._records)
         if self.evaluator is not None:
             try:
-                return list(self.evaluator.history())
+                signature = self.evaluator.spec().get("measurement_signature")
+                return [record for record in self.evaluator.history()
+                        if not signature or record.get("measurement_signature") == signature]
             except Exception as e:
                 self.log(tr("读取历史失败: %s") % e)
         return []

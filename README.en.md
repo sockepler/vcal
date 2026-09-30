@@ -67,46 +67,53 @@ CLI options: `--budget N` total evals (never more than N), `--batch q` parallel 
 `--no-resume` (ignore history).
 
 `check` validates configuration structure, referenced files, devices, parameter
-ranges, and metric references. It does not validate waveform-expression syntax
-or run a real simulation.
+ranges, metric-expression syntax, symbols, dependencies, and analysis selection.
+It does not run a real simulation; whether a saved signal exists is verified when
+the metric is evaluated.
 
-## OTA workflow: gm/Id, scopes, and review
+## General circuit metrics
 
-See [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md) for the complete workflow. The
-GUI gm/Id panel loads an existing NPZ/CSV LUT; the synthetic table in this
-repository is only a flow demo and contains no PDK data:
+The **Circuit metrics** page edits transient stop/maxstep, Spectre DC
+source/start/stop/step, and metric expressions. It offers 24 templates for
+settling time, DC gain, FFT, DNL/INL, power, and energy. After validation and
+apply, the metrics become available to the objective and constraint selectors;
+a metric referenced by an objective or constraint cannot be deleted directly.
+`tran` and `dc` may be configured separately or together. Metric values can remain
+legacy strings or use `{analysis: dc, expr: "..."}`. See
+[`docs/METRICS.md`](docs/METRICS.md) for signatures, units, and boundaries, and
+[`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md) for the apply-to-objective flow.
 
-```bash
-./vcal gmid examples/gmid_demo.csv \
-  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
-```
+~~~yaml
+tran: {stop: 200n, maxstep: 50p}
+dc: {source: VBIAS, start: 0, stop: 1.8, step: 10m}
+metrics:
+  gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
+  settle: {analysis: tran, expr: "settle_time(V('out'), start=0, end=200n, final=1.0)"}
+  sndr: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0)"
+constraints:
+  - {metric: settle, max: 20n}
+~~~
 
-The CLI can inspect parameter groups, run one sub-cell scope, and review a
-history offline:
+`settle_time` raises by default when the waveform has not settled. To retain a
+finite window result, explicitly use `on_unsettled: window` and constrain
+`settled(...) == 1`. FFT `fund` is a bin, not hertz. Use
+`adc_static(method='histogram')` only for a complete uniform-ramp code-density
+run; `adc_transitions` requires complete transition boundaries, and `decode_bits`
+accepts `(samples, bits)` waveforms assembled with `np.column_stack`.
 
-```bash
-./vcal scopes <circuit.yaml> --json
-./vcal run <circuit.yaml> --scope <scope-name> \
-  --stagnation-rounds 6 --initial-points points.json --budget 100
-./vcal review <history.jsonl> --config <circuit.yaml> --json
-```
+## Optional gm/Id and scope helpers
 
-Without `--scope`, all enabled parameters are optimized. With a scope selected,
-only parameters whose every `devices` entry belongs to that scope remain active;
-shared and unselected-scope parameters use configured fixed/nominal values in
-the CLI, or the initial-value column in the GUI.
-`--initial-points` takes a JSON list of physical SI-value mappings, and
-`--stagnation-rounds` is the non-negative number of stagnant rounds before global
-exploration is queued. The GUI path is: open the gm/Id LUT → map width/length
-parameters → calculate and apply initial values → select a scope → start the
-optimization with the existing configuration → review the history with `review`.
+The gm/Id panel still loads NPZ/CSV LUTs offline and can apply a sizing suggestion
+as an initial value; scopes can still inspect one sub-cell range. The synthetic
+demo contains no PDK data:
 
-In `params.devices`, `scope/instance` identifies a device inside a subcircuit
-master; changing that master affects all of its instances. Scope selection does
-not create new stimuli or a new testbench: simulations still use the configured
-netlist and existing testbench. This version does not automatically generate a
-PDK LUT or an OTA AC testbench; the synthetic LUT and examples here do not claim
-real Spectre testing or performance results.
+~~~bash
+./vcal gmid examples/gmid_demo.csv --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+~~~
+
+These helpers do not generate a PDK LUT, an OTA AC testbench, or new stimuli. The
+current priority is reusable tran/DC, FFT, ADC-static, power, and energy
+measurement; OTA-specific test infrastructure is a future option.
 
 ### Interface language
 

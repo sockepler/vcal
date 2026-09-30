@@ -1,0 +1,5 @@
+// Analytic measurement fixture; no PDK required.
+simulator lang=spectre
+R1 (in out) resistor r=1k
+R2 (out 0) resistor r=1k
+C1 (out 0) capacitor c=1n

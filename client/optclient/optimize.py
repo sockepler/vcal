@@ -111,9 +111,13 @@ class Optimizer:
 
     def resume_from_server(self):
         hist = self.server.history()
+        signature = self.spec.get("measurement_signature")
+        before = len(self.records)
         for r in hist:
+            if signature and r.get("measurement_signature") != signature:
+                continue
             self._ingest(r)
-        return len(hist)
+        return len(self.records) - before
 
     def _tensors(self):
         y_bad = self._worst_objective()

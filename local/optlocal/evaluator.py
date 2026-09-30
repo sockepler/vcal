@@ -350,6 +350,7 @@ class LocalEvaluator:
 
     def evaluate(self, params):
         call_params, record_params = self._normalize_params(params)
+        signature = self.spec().get("measurement_signature")
         idx, workdir = self._allocate_trial()
         self._acquire_job()
         started = time.monotonic()
@@ -371,6 +372,8 @@ class LocalEvaluator:
                     time.monotonic() - started, 2))
         finally:
             self._release_job()
+        if signature:
+            res.setdefault("measurement_signature", signature)
         self._append_history(res)
         return res
 

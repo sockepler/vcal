@@ -25,6 +25,8 @@ tb_*.sp
 tb_*.scs
 dut.sp
 dut.scs
+# Public analytic RC fixture; contains only primitive R/C devices, no chip IP.
+!examples/metrics_rc/dut.scs
 ade_e.scs
 
 # ============ 环境 / 缓存 / 临时 ============

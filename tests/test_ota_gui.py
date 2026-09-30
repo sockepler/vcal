@@ -39,6 +39,8 @@ class OtaGuiTests(unittest.TestCase):
                              optimizer={"stagnation_rounds": 4})
         self.ev.ckt.params = params
         self.ev.ckt.cfg.update(copy.deepcopy(self.ev._spec))
+        # Circuit YAML stores expressions; the public spec stores names.
+        self.ev.ckt.cfg["metrics"] = {name: "1.0" for name in self.ev._spec["metrics"]}
         self.win = gui.MainWindow(language="en")
         with mock.patch.object(QFileDialog, "getOpenFileName",
                                return_value=(str(Path(self.tmp.name) / "ota.yaml"), "")), \

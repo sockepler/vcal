@@ -54,39 +54,48 @@ CLI 选项：`--budget N` 总评估数（不会超过 N）、`--batch q` 并行�
 `--device auto|cuda|rocm|cpu`、`--remote-gpu URL`、`--resume`(默认从历史续跑)
 或 `--no-resume`（忽略历史）。
 
-`check` 只检查配置结构、引用文件、器件、参数范围和指标引用，不检查波形
-表达式语法，也不运行真实仿真。
+`check` 会检查配置结构、引用文件、器件、参数范围、指标表达式语法、符号、
+指标依赖和 analysis 归属；它不运行真实仿真，保存信号是否存在仍在实际求值时
+验证。
 
-## OTA 工作流：gm/Id、scope 与复盘
+## 通用电路指标
 
-完整步骤见 [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md)。GUI 的 gm/Id 面板可以
-加载已有的 NPZ/CSV LUT；仓库中的合成演示表只用于验证流程，不包含 PDK 数据：
+GUI 的 **Circuit metrics** 页面可编辑 transient 的 stop/maxstep、Spectre DC
+的 source/start/stop/step，以及指标表达式。它提供 24 个建立时间、DC gain、FFT、
+DNL/INL、功率和能量模板；模板或自定义指标通过校验并应用后，才会出现在目标
+和约束选择器中，已被目标或约束引用的指标不能直接删除。`tran`、`dc` 可以单独配置
+或同时配置；指标值可为旧字符串，也可写成 `{analysis: dc, expr: "..."}`。完整签名、单位和边界见
+[`docs/METRICS.md`](docs/METRICS.md)；配置到应用的流程见
+[`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md)。
 
-```bash
-./vcal gmid examples/gmid_demo.csv \
-  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
-```
+~~~yaml
+tran: {stop: 200n, maxstep: 50p}
+dc: {source: VBIAS, start: 0, stop: 1.8, step: 10m}
+metrics:
+  gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
+  settle: {analysis: tran, expr: "settle_time(V('out'), start=0, end=200n, final=1.0)"}
+  sndr: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0)"
+constraints:
+  - {metric: settle, max: 20n}
+~~~
 
-CLI 还可以查看参数分组、按一个子 cell scope 运行，以及离线复盘历史：
+`settle_time` 默认未建立即失败；要保留窗口长度，必须显式使用
+`on_unsettled: window` 并加 `settled(...) == 1` 约束。FFT 的 fund 是 bin 而非
+Hz。`adc_static(method='histogram')` 只用于完整均匀 ramp code-density，
+`adc_transitions` 要求完整转换边界，`decode_bits` 接收可由
+`np.column_stack` 构成的 `(samples, bits)` 波形。
 
-```bash
-./vcal scopes <circuit.yaml> --json
-./vcal run <circuit.yaml> --scope <scope-name> \
-  --stagnation-rounds 6 --initial-points points.json --budget 100
-./vcal review <history.jsonl> --config <circuit.yaml> --json
-```
+## 可选 gm/Id 与 scope 辅助
 
-省略 `--scope` 会优化全部启用参数；指定 scope 后，只有所有 `devices` 都属于该
-scope 的参数保持活跃。CLI 中，共享参数和其他范围使用配置的 fixed／名义值；
-GUI 中使用初值列的值。`--initial-points`
-是包含物理 SI 数值映射的 JSON 列表，`--stagnation-rounds` 是触发全局探索的非负
-停滞轮数。GUI 的路径是：打开 gm/Id LUT → 选择宽度/长度映射参数 → 计算并应用为
-初值 → 选择 scope → 使用现有配置开始优化 → 用 `review` 复盘历史。
+gm/Id 面板仍可离线加载 NPZ/CSV LUT，把尺寸建议作为优化初值；scope 仍可让
+CLI/GUI 先检查一个 sub-cell 范围。合成演示表不含 PDK 数据：
 
-`params.devices` 中的 `scope/instance` 指向 subckt master 内的器件；修改该 master
-会影响它的全部实例。scope 选择不会生成新的激励或测试平台，仿真仍使用配置中的
-现有网表和 testbench。此版本不会自动生成 PDK LUT，也不会自动生成 OTA AC 测试平台；
-合成 LUT 和本文示例不代表真实 Spectre 测试或性能结果。
+~~~bash
+./vcal gmid examples/gmid_demo.csv --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+~~~
+
+这些功能不自动生成 PDK LUT、OTA AC testbench 或新的激励。当前优先级是通用
+tran/dc、FFT、ADC 静态和功耗/能量测量；OTA 专用平台属于可选远期方向。
 
 ### 界面语言
 

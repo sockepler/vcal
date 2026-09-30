@@ -303,9 +303,15 @@ def _review(a):
         from .review import analyze_records
         spec = Circuit(a.config).spec()
         records = read_history(a.history_jsonl)
+        signature = spec.get("measurement_signature")
+        excluded = sum(bool(signature and r.get("measurement_signature") != signature)
+                       for r in records)
+        records = [r for r in records
+                   if not signature or r.get("measurement_signature") == signature]
         result = analyze_records(
             records, spec["objective"], spec.get("constraints", []),
             spec.get("params", []))
+        result["excluded_measurement_records"] = excluded
         _emit(result, a.json)
         return 0
     except Exception as exc:

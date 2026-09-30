@@ -1,175 +1,243 @@
-"""Metric extraction from transient waveforms.
+"""Reusable transient, DC and ADC measurements for numerical circuit objectives.
 
-Metrics are defined in the circuit YAML as expressions over saved signals,
-evaluated with numpy and the helpers below. Example:
-
-    metrics:
-      vod_final:  "avg(V('VOP') - V('VON'), 90n, 100n)"
-      gain:       "m['vod_final'] / 0.1"
-      tsettle:    "settle_time(V('VOP') - V('VON'), start=15n, tol=0.005)"
-      power_mw:   "avg(-I('V_VDD'), 20n, 100n) * 1.8 * 1e3"
-
-Earlier metrics are visible to later ones through `m`.
-Suffixed literals like `90n` are rewritten to floats before eval.
+Saved signals are sampled only within the available data range. Empty windows,
+unsettled responses and undefined ratios are explicit measurement failures.
+See docs/METRICS.md for units, conventions and legacy FFT phase-search behavior.
 """
+import hashlib
+import json
 import math
-import re
+import warnings
 
 import numpy as np
 
-_SUFFIX = {"T": 1e12, "G": 1e9, "M": 1e6, "K": 1e3, "k": 1e3, "m": 1e-3,
-           "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15, "a": 1e-18}
+from .measurements import WaveMeasurements
+from .metricexpr import (expand_literals as _expand_literals, prepare_definitions,
+                         validate_metric_definitions)
 
-_LIT = re.compile(r"\b([0-9]+\.?[0-9]*(?:[eE][-+]?[0-9]+)?)([TGMKkmunpfa])\b")
-
-
-def _expand_literals(expr):
-    """Rewrite '90n' -> '(90*1e-9)' so eng notation works in expressions."""
-    return _LIT.sub(lambda m: "(%s*%g)" % (m.group(1), _SUFFIX[m.group(2)]),
-                    expr)
+MEASUREMENT_VERSION = 2
 
 
-class Waves:
-    def __init__(self, t, sigs):
-        self.t = t
-        self.sigs = sigs
+def measurement_signature(defs, analyses, save=()):
+    payload = {"version": MEASUREMENT_VERSION, "metrics": defs,
+               "analyses": analyses, "save": sorted(save)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
-    # ---- signal access ----
+
+def _finite(value, name):
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(name + " must be a finite number")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(name + " must be a finite number")
+    return value
+
+
+def _count(value, name, minimum=1):
+    parsed = _finite(value, name)
+    if parsed < minimum or not parsed.is_integer():
+        raise ValueError("%s must be an integer >= %d" % (name, minimum))
+    return int(parsed)
+
+
+class Waves(WaveMeasurements):
+    def __init__(self, t, sigs, analysis="tran"):
+        if np.iscomplexobj(t) or any(np.iscomplexobj(v) for v in sigs.values()):
+            raise ValueError("waveform axis and signals must be real")
+        self.t = np.asarray(t, float)
+        if self.t.ndim != 1 or len(self.t) < 2 or not np.isfinite(self.t).all():
+            raise ValueError("waveform axis needs at least two finite samples")
+        self.sigs = {name: np.asarray(values, float) for name, values in sigs.items()}
+        if any(values.shape != self.t.shape for values in self.sigs.values()):
+            raise ValueError("signal and sweep lengths differ")
+        if analysis == "dc" and np.all(np.diff(self.t) < 0):
+            self.t = self.t[::-1]
+            self.sigs = {name: values[::-1] for name, values in self.sigs.items()}
+        if not np.all(np.diff(self.t) > 0):
+            raise ValueError("waveform axis must be strictly monotonic")
+        self.analysis = analysis
+
     def V(self, name):
-        for k in (name, name + "!", name.upper(), name.lower()):
-            if k in self.sigs:
-                return self.sigs[k]
-        raise KeyError("signal %r not in saved traces %s"
-                       % (name, sorted(self.sigs)[:20]))
+        for key in (name, name + "!", name.upper(), name.lower()):
+            if key in self.sigs:
+                return self.sigs[key]
+        matches = [value for key, value in self.sigs.items() if key.casefold() == name.casefold()]
+        if len(matches) == 1:
+            return matches[0]
+        raise KeyError("signal %r not in saved traces %s" % (name, sorted(self.sigs)[:20]))
 
     def I(self, srcname):
-        """Terminal current of a source, saved as e.g. 'V_VDD:p'."""
-        for base in (srcname, srcname.lower(), srcname.upper()):
-            for k in (base + ":p", base, base + ":1"):
-                if k in self.sigs:
-                    return self.sigs[k]
+        for suffix in (":p", "", ":1"):
+            matches = [value for key, value in self.sigs.items()
+                       if key.casefold() == (srcname + suffix).casefold()]
+            if len(matches) == 1:
+                return matches[0]
         raise KeyError("current %r not in saved traces" % srcname)
 
-    # ---- window helpers ----
+    def _vector(self, x):
+        if np.iscomplexobj(x):
+            raise ValueError("measurement requires a real signal")
+        values = np.asarray(x, float)
+        if values.shape != self.t.shape or not np.isfinite(values).all():
+            raise ValueError("measurement requires a finite signal matching the waveform axis")
+        return values
+
+    def _range(self, t0=None, t1=None):
+        lo = self.t[0] if t0 is None else _finite(t0, "window start")
+        hi = self.t[-1] if t1 is None else _finite(t1, "window end")
+        epsilon = 8 * np.finfo(float).eps * max(abs(self.t[0]), abs(self.t[-1]), self.t[-1] - self.t[0])
+        if lo < self.t[0] - epsilon or hi > self.t[-1] + epsilon or lo > hi:
+            raise ValueError("measurement window [%g, %g] is outside [%g, %g] or reversed" %
+                             (lo, hi, self.t[0], self.t[-1]))
+        return max(lo, self.t[0]), min(hi, self.t[-1])
+
+    def _window(self, x, t0=None, t1=None, min_points=2):
+        values = self._vector(x)
+        lo, hi = self._range(t0, t1)
+        interior = (self.t > lo) & (self.t < hi)
+        axis = np.concatenate(([lo], self.t[interior], [hi])) if lo < hi else np.asarray([lo])
+        if len(axis) < min_points:
+            raise ValueError("measurement window has insufficient distinct samples")
+        return axis, np.interp(axis, self.t, values)
+
     def _win(self, t0=None, t1=None):
-        sel = np.ones(len(self.t), bool)
-        if t0 is not None:
-            sel &= self.t >= t0
-        if t1 is not None:
-            sel &= self.t <= t1
-        return sel
-
-    def avg(self, x, t0=None, t1=None):
-        sel = self._win(t0, t1)
-        if not sel.any():
-            return float("nan")
-        return float(np.trapezoid(x[sel], self.t[sel])
-                     / (self.t[sel][-1] - self.t[sel][0])) \
-            if sel.sum() > 1 else float(x[sel][0])
-
-    def rms(self, x, t0=None, t1=None):
-        sel = self._win(t0, t1)
-        return float(np.sqrt(np.mean(np.square(x[sel])))) if sel.any() \
-            else float("nan")
-
-    def vmax(self, x, t0=None, t1=None):
-        sel = self._win(t0, t1)
-        return float(np.max(x[sel])) if sel.any() else float("nan")
-
-    def vmin(self, x, t0=None, t1=None):
-        sel = self._win(t0, t1)
-        return float(np.min(x[sel])) if sel.any() else float("nan")
+        lo, hi = self._range(t0, t1)
+        return (self.t >= lo) & (self.t <= hi)
 
     def at(self, x, tq):
-        return float(np.interp(tq, self.t, x))
+        point = _finite(tq, "sample location")
+        self._range(point, point)
+        return float(np.interp(point, self.t, self._vector(x)))
+
+    def avg(self, x, t0=None, t1=None):
+        axis, values = self._window(x, t0, t1, min_points=1)
+        if len(axis) == 1:
+            return float(values[0])
+        return float(np.sum(np.diff(axis) * (values[:-1] + values[1:]) * .5) /
+                     (axis[-1] - axis[0]))
+
+    def rms(self, x, t0=None, t1=None):
+        axis, values = self._window(x, t0, t1, min_points=1)
+        if len(axis) == 1:
+            return abs(float(values[0]))
+        a, b = values[:-1], values[1:]
+        energy = np.sum(np.diff(axis) * (a*a + a*b + b*b) / 3)
+        return float(np.sqrt(energy / (axis[-1] - axis[0])))
+
+    def std(self, x, t0=None, t1=None):
+        return self.rms(self._vector(x) - self.avg(x, t0, t1), t0, t1)
+
+    def integ(self, x, t0=None, t1=None):
+        axis, values = self._window(x, t0, t1)
+        return float(np.sum(np.diff(axis) * (values[:-1] + values[1:]) * .5))
+
+    def vmax(self, x, t0=None, t1=None):
+        return float(np.max(self._window(x, t0, t1, min_points=1)[1]))
+
+    def vmin(self, x, t0=None, t1=None):
+        return float(np.min(self._window(x, t0, t1, min_points=1)[1]))
+
+    def pp(self, x, t0=None, t1=None):
+        return self.vmax(x, t0, t1) - self.vmin(x, t0, t1)
 
     def slice(self, x, t0, t1):
-        sel = self._win(t0, t1)
-        return x[sel]
+        return self._vector(x)[self._win(t0, t1)]
 
-    def settle_time(self, x, start=0.0, end=None, tol=0.005, final=None):
-        """Time (from `start`) after which x stays within tol (relative to
-        the settling step) of its final value. Returns end-start if it
-        never settles."""
-        sel = self._win(start, end)
-        if sel.sum() < 4:
-            return float("nan")
-        ts, xs = self.t[sel], x[sel]
-        xf = float(np.mean(xs[max(1, int(0.95 * len(xs))):])) \
-            if final is None else final
-        step = abs(xf - xs[0])
-        band = tol * (step if step > 1e-9 else max(abs(xf), 1e-9))
-        outside = np.abs(xs - xf) > band
-        if not outside.any():
-            return 0.0
-        last_out = np.max(np.nonzero(outside)[0])
-        if last_out >= len(ts) - 1:
-            return float(ts[-1] - ts[0])   # never settles in window
-        return float(ts[last_out + 1] - ts[0])
+    def sample(self, x, fs, nsamp, t0=0.0, method="linear"):
+        fs = _finite(fs, "sample rate")
+        if fs <= 0:
+            raise ValueError("sample rate must be positive")
+        count = _count(nsamp, "sample count")
+        times = _finite(t0, "sampling start") + np.arange(count) / fs
+        self._range(times[0], times[-1])
+        values = self._vector(x)
+        if method == "linear":
+            return np.interp(times, self.t, values)
+        if method == "previous":
+            return values[np.clip(np.searchsorted(self.t, times, side="right") - 1, 0, len(values)-1)]
+        raise ValueError("sampling method must be linear or previous")
 
-    def enob(self, x, fs, fund, nsamp, t0_lo, t0_hi, nphase=48):
-        """相干 FFT ENOB：在 [t0_lo, t0_hi] 扫采样相位（避开这个项目反复
-        踩坑的 measurement-aliasing），每个相位取 nsamp 个 @1/fs 间隔的
-        样本，去均值后 FFT，基波在 bin=fund，SNDR=sig/其余噪声，
-        ENOB=(SNDR-1.76)/6.02。返回相位扫描到的最佳 ENOB。"""
-        Ts = 1.0 / fs
-        best = float("-inf")
-        for t0 in np.linspace(t0_lo, t0_hi, int(nphase)):
-            ts = t0 + np.arange(int(nsamp)) * Ts
-            if ts[-1] > self.t[-1]:
-                continue
-            xs = np.interp(ts, self.t, x)
-            xs = xs - xs.mean()
-            p = np.abs(np.fft.rfft(xs)) ** 2
-            if int(fund) >= len(p):
-                continue
-            sig = p[int(fund)]
-            noise = float(p[1:int(nsamp) // 2].sum()) - sig
-            if sig <= 0 or noise <= 0:
-                continue
-            sndr = 10 * math.log10(sig / noise)
-            e = (sndr - 1.76) / 6.02
-            if e > best:
-                best = e
-        return best if best > float("-inf") else float("nan")
+    def _fft_stat(self, key, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48,
+                  *, t0=None, window="rect", harmonics=5, bin_width=None, phase_mode=None):
+        from .adc_metrics import spectrum
+        if t0 is not None and (t0_lo is not None or t0_hi is not None):
+            raise ValueError("choose fixed t0 or a phase interval, not both")
+        if t0_lo is None and t0_hi is None:
+            times = [self.t[0] if t0 is None else t0]
+            mode = phase_mode or "fixed"
+        elif t0_lo is None or t0_hi is None:
+            raise ValueError("phase search requires both t0_lo and t0_hi")
+        else:
+            lo, hi = _finite(t0_lo, "t0_lo"), _finite(t0_hi, "t0_hi")
+            if hi < lo:
+                raise ValueError("phase interval is reversed")
+            times = np.linspace(lo, hi, _count(nphase, "phase count"))
+            mode = phase_mode or "best"
+            if hi > lo and phase_mode is None:
+                warnings.warn("legacy FFT phase search reports the best phase; use fixed t0 or phase_mode='worst' for robust targets",
+                              RuntimeWarning, stacklevel=3)
+        if mode not in ("fixed", "best", "worst") or (mode == "fixed" and len(times) != 1):
+            raise ValueError("phase_mode must be fixed (one phase), best or worst")
+        results = [spectrum(self.sample(x, fs, nsamp, start), fs, fund,
+                            window=window, harmonics=harmonics, bin_width=bin_width)[key]
+                   for start in times]
+        if mode == "worst":
+            return max(results) if key == "thd" else min(results)
+        return min(results) if key == "thd" else max(results)
 
-    def sndr(self, x, fs, fund, nsamp, t0_lo, t0_hi, nphase=48):
-        e = self.enob(x, fs, fund, nsamp, t0_lo, t0_hi, nphase)
-        return e * 6.02 + 1.76
+    def enob(self, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs):
+        return self._fft_stat("enob", x, fs, fund, nsamp, t0_lo, t0_hi, nphase, **kwargs)
 
-    def overshoot(self, x, start=0.0, end=None):
-        """Peak deviation beyond final value, relative to step size."""
-        sel = self._win(start, end)
-        if sel.sum() < 4:
-            return float("nan")
-        xs = x[sel]
-        xf = float(np.mean(xs[max(1, int(0.95 * len(xs))):]))
-        step = xf - xs[0]
-        if abs(step) < 1e-12:
-            return 0.0
-        peak = np.max(xs) if step > 0 else np.min(xs)
-        return float(max(0.0, (peak - xf) / step)) if step > 0 \
-            else float(max(0.0, (xf - peak) / -step))
+    def sndr(self, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs):
+        return self._fft_stat("sndr", x, fs, fund, nsamp, t0_lo, t0_hi, nphase, **kwargs)
+
+    def snr(self, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs):
+        return self._fft_stat("snr", x, fs, fund, nsamp, t0_lo, t0_hi, nphase, **kwargs)
+
+    def thd(self, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs):
+        return self._fft_stat("thd", x, fs, fund, nsamp, t0_lo, t0_hi, nphase, **kwargs)
+
+    def sfdr(self, x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs):
+        return self._fft_stat("sfdr", x, fs, fund, nsamp, t0_lo, t0_hi, nphase, **kwargs)
+
+    def environment(self):
+        from .adc_metrics import spectrum, adc_static, transition_metrics, decode
+        functions = {name: getattr(self, name) for name in (
+            "V", "I", "avg", "rms", "vmax", "vmin", "at", "slice", "pp", "integ", "std",
+            "cross", "rise_time", "fall_time", "delay", "slew_rate", "settle_time", "settled",
+            "settling_error", "overshoot", "dc_gain", "dc_offset", "sample", "enob")}
+        return {"__builtins__": {}, "np": np, "abs": abs, "min": min, "max": max,
+                "float": float, "int": int, "round": round, "len": len, "sum": sum,
+                "log10": math.log10, "log": math.log, "sqrt": math.sqrt,
+                "db": lambda value: 20 * math.log10(abs(value)),
+                **functions, "sndr_fft": self.sndr, "snr_fft": self.snr,
+                "thd_fft": self.thd, "sfdr_fft": self.sfdr,
+                "fft_metrics": spectrum, "adc_static": adc_static,
+                "adc_transitions": transition_metrics, "decode_bits": decode,
+                "t": self.t, "axis": self.t}
 
 
-def compute_metrics(defs, t, sigs):
-    """defs: ordered {name: expr}. Returns {name: float}."""
-    w = Waves(t, sigs)
-    env = {"__builtins__": {},
-           "np": np, "abs": abs, "min": min, "max": max, "float": float,
-           "log10": math.log10, "log": math.log, "sqrt": math.sqrt,
-           "db": lambda v: 20 * math.log10(abs(v)) if v else float("-inf"),
-           "V": w.V, "I": w.I, "avg": w.avg, "rms": w.rms,
-           "vmax": w.vmax, "vmin": w.vmin, "at": w.at, "slice": w.slice,
-           "settle_time": w.settle_time, "overshoot": w.overshoot,
-           "enob": w.enob, "sndr_fft": w.sndr,
-           "t": t}
+def compute_metrics(defs, t=None, sigs=None, *, datasets=None, default_analysis="tran"):
+    data = dict(datasets or {})
+    if t is not None:
+        data.setdefault(default_analysis, (t, sigs))
+    entries = prepare_definitions(defs, data, default_analysis)
+    waves = {key: Waves(*values, analysis=key) for key, values in data.items()}
+    environments = {key: value.environment() for key, value in waves.items()}
     out = {}
-    env["m"] = out
-    for name, expr in defs.items():
+    for name, entry in entries.items():
         try:
-            v = eval(_expand_literals(str(expr)), env)   # noqa: S307
-            out[name] = float(v)
-        except Exception as e:
-            raise RuntimeError("metric %r failed: %s" % (name, e))
-    return out
+            env = environments[entry["analysis"]]
+            env["m"] = out
+            with np.errstate(divide="raise", invalid="raise", over="raise", under="ignore"):
+                value = eval(entry["code"], env)  # noqa: S307 -- numerical AST validated above.
+            array = np.asarray(value)
+            if array.shape != () or np.iscomplexobj(array):
+                raise ValueError("metric must reduce to one real scalar")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("metric result is not finite")
+            out[name] = value
+        except Exception as exc:
+            raise RuntimeError("metric %r [%s] failed: %s" % (name, entry["analysis"], exc)) from exc
+    return {name: out[name] for name in defs}

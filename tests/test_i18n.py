@@ -68,7 +68,9 @@ class LanguageTests(LanguageEnvironment, unittest.TestCase):
                                     .read_text(encoding="utf-8"))
                     for lang in i18n.LANGUAGES}
         keys = set(catalogs["zh"])
-        percent = re.compile(r"%(?:\([^)]+\))?[-+ #0]*\d*(?:\.\d+)?[a-zA-Z%]")
+        # Percentages in descriptions (e.g. "10% to 90% of") are display
+        # text, not printf substitutions. Only recognize valid conversions.
+        percent = re.compile(r"(?<!\d)%(?:\([^)]+\))?[-+ #0]*\d*(?:\.\d+)?[diouxXeEfFgGcrsa%]")
         formatter = string.Formatter()
         for language, catalog in catalogs.items():
             self.assertEqual(set(catalog), keys, language)
@@ -82,7 +84,7 @@ class LanguageTests(LanguageEnvironment, unittest.TestCase):
                 if "{language}" in source:
                     fields = lambda text: [p[1] for p in formatter.parse(text) if p[1]]
                     self.assertEqual(fields(source), fields(translation))
-        for filename in ("gui.py", "gmid_gui.py", "__main__.py", "engine.py", "proposer.py"):
+        for filename in ("gui.py", "gmid_gui.py", "metrics_gui.py", "__main__.py", "engine.py", "proposer.py"):
             tree = ast.parse((root / filename).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -98,6 +100,10 @@ class LanguageTests(LanguageEnvironment, unittest.TestCase):
                     self.assertIn(arg.value, keys, (filename, arg.value))
         for source in gui.GOAL_CN.values():
             self.assertIn(source, keys)
+        from optserver.metric_catalog import metric_catalog
+        for entry in metric_catalog():
+            for field in ("title", "description"):
+                self.assertIn(entry[field], keys)
         self.assertEqual(i18n.tr("未登记原始信息", "en"), "未登记原始信息")
 
 

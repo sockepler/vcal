@@ -1,81 +1,170 @@
-# OTA／运放：gm/Id 初值、子 cell 调参和迭代复盘
+# 通用电路指标工作流（OTA／gm/Id 为可选方向）
 
-本轮交付把已有器件查表、尺寸初值、子电路选参和本地优化连在一起。这里的“自我迭代”是预算内的停滞检测、全局探索、历史复盘和最优点复用；不会自行修改指标定义、放宽约束或增加仿真预算。
+当前优先级是把通用电路测量做成可复用、可校验的接口。OTA 的 gm/Id 初值
+和 scope 仍可使用，但它们是可选的设计辅助；增益、建立时间、ADC、功耗等
+指标都通过同一套 Circuit metrics 配置进入目标和约束。
 
-## 已实现的工作流
+完整函数签名、单位和失败条件见 [docs/METRICS.md](METRICS.md)。
 
-1. 打开现有电路 YAML，在 **gm/Id 助手** 中载入 gmid-tool 的 NPZ，或符合下述格式的 CSV。没有工艺数据时可以加载内置合成演示；演示仅用于验证操作和计算。
-2. 选择 L、|VDS|、|VSB|、目标 gm/Id，以及单个器件的 ID 或 gm。助手绘制 gm/Id–Id/W 曲线，计算总有效宽度，并显示 VGS、gm 和可用的 gm/gds、fT。
-3. 将结果映射到现有宽度参数，可同时映射长度。若参数表示单指宽度，填写 `nf × m`，实际初值为 `W_total / (nf × m)`。匹配对中每个器件使用同一个参数时，目标 ID 是每个器件的电流，不能直接填写整个差分对的尾电流。
-4. 点击“用作优化初值”，在参数页检查可编辑的初值。超出当前边界的建议会整组拒绝，不会悄悄裁剪或只修改其中一部分。原始网表值保留在独立列中。
-5. 可选择一个子 cell 范围，先运行初值检查，再开始优化。初值检查使用当前初值列；空白项保留网表值。优化先使用给定初值，再补名义点和 Sobol 点，所有点都受总预算约束。
-6. 查看原有迭代散点图和新增“迭代复盘”。“将最佳点用作初值”按照当前目标、约束重新挑选可行点，供下一轮使用。继续当前优化需提高总预算；若要重新开始则关闭历史续跑，命令行可另设 `--workroot`。
+## Circuit metrics 页面
 
-以上界面和新增命令帮助均支持中文、English、日本語。保存配置副本会保留当前范围产生的启用／固定状态、初值列表以及停滞轮数。
+GUI 的 **Circuit metrics** 页面提供四个连续步骤：
 
-### 子 cell 的含义
+1. 选择要使用的分析。可以只配置 tran、只配置 dc，也可以同时配置。tran
+   编辑 stop 和 maxstep；dc 编辑 source、start、stop、step。dc 扫描当前只
+   支持 Spectre，source 必须是网表中的 source instance。
+2. 在指标表中添加或编辑表达式。模板覆盖建立时间、DC gain、FFT、DNL/INL、
+   功率和能量；每个指标可选择 tran 或 dc。旧的字符串值继续使用默认分析。
+3. 运行语法、依赖和分析预检，通过后应用配置。依赖 m["name"] 会自动排序；
+   未知引用、循环、未配置分析和非法表达式在仿真前报告。
+4. 在目标和约束页面选择已验证的指标。最终每个指标必须是有限实标量；
+   字典和数组要先用字段索引或归约，理想 FFT 的 inf 不能直接作为优化目标。
 
-器件引用 `ota/M1` 的 `ota` 是网表中的 **subckt 定义名称**。选择它会启用只属于该定义的参数；同一变量如果还控制 `bias/M2` 等其他定义，会作为共享参数固定。GUI 中，其他范围保持初值列中的值；未指定数值且无法解析名义值的参数保持原网表表达式。
+## YAML 最小结构
 
-这是按子电路定义选参，**该定义的全部实例会一起变化**，也继续使用原配置的完整测试平台。它尚不提供实例专属修改、自动切出独立 cell 测试平台或功能组轮转。一个 OTA 内的输入对、负载、尾电流源仍可通过现有参数勾选手动分组。
+~~~yaml
+simulator: spectre
+stimuli: my_tb.scs
+netlist: my_dut.scs
 
-### 停滞和复盘
+tran: {stop: 200n, maxstep: 50p}
+dc: {source: VBIAS, start: 0, stop: 1.8, step: 10m}
 
-- `optimizer.stagnation_rounds: N` 表示连续 N 个优化批次没有改善时，下一批使用全局 Sobol 探索并重置信赖域。已有可行点时比较目标值；没有可行点时比较按约束边界尺度归一化的总违反量。初始化批次不计入停滞轮数。
-- GUI 新配置默认 6；CLI／Engine 对没有该字段的旧配置保持关闭。设 0 可关闭。探索消耗同一总预算，未完成的探索状态会保存在检查点并在兼容续跑中恢复。
-- 复盘报告成功、失败、可行点、重复点、距上次可行改善的评估数和常见错误。至少 6 个样本时可显示参数与目标的 Spearman 秩相关；有足够可行点时优先用可行点，否则明确标为全部有效点。
-- 历史相关性是采样分布下的描述，不能据此认定参数因果敏感度。复盘只给建议，不自动收紧边界或删除变量。
+save: [v(out), v(in), v(adc_in), i(VDD)]
 
-## 命令行
+metrics:
+  settle_half_lsb:
+    analysis: tran
+    expr: "settle_time(V('adc_in'), start=0, end=200n, final=0.9)"
+  gain_vv:
+    analysis: dc
+    expr: "dc_gain(V('out'), V('in'))"
+  sndr_db:
+    analysis: tran
+    expr: "sndr_fft(V('adc_in'), 1G, 7, 256, t0=0)"
 
-仓库自带的合成查表可以直接查询，不启动 Spectre：
+objective: {metric: gain_vv, goal: maximize}
+constraints:
+  - {metric: settle_half_lsb, max: 20n}
+~~~
 
-```bash
-./vcal gmid examples/gmid_demo.csv --length 180n --vds 0.6 --gmid 15 --id 20u --json
-```
+tran 和 dc 可以单独存在；两者都存在时，旧字符串指标默认使用 tran。
+需要明确归属时使用 {analysis: dc, expr: "..."} 或 {analysis: tran, expr: "..."}。
+dc 配置只接受 source/start/stop/step，步长必须朝向终点且包含至少两个点。
+simulator: hspice 时不能使用 dc。
 
-下面命令需要替换成你已有且有效的电路配置、子电路名称和历史路径：
+## 指标选择
 
-```bash
-./vcal scopes YOUR_CIRCUIT.yaml --json
-./vcal run YOUR_CIRCUIT.yaml --scope ota --stagnation-rounds 6 --budget 80
-./vcal review YOUR_WORK/history.jsonl --config YOUR_CIRCUIT.yaml --json
-```
+### 建立时间和 transient
 
-`review` 的 `--config` 应与历史实际使用的目标和约束一致。若运行时覆盖过目标或在 GUI 中编辑过设置，请先保存对应配置副本。`check`、`scopes`、`review`、`gmid` 本身均不运行仿真。
+settle_time 的默认 on_unsettled="raise" 会把窗口内未建立视为失败。
+如果明确使用 on_unsettled="window" 保留窗口长度，必须同时把
+settled(...) == 1 加入约束。未给 atol 时使用 tol*abs(final-initial)；显式
+atol 会覆盖 tol。ADC 半 LSB 可写成 atol=0.5*Vref/2**bits，输出单位是秒。
+rise_time、fall_time、
+delay、slew_rate、cross、overshoot、settling_error 适合组合成建立、
+过冲和速度指标。
 
-在现有 YAML 中可添加（名称必须换成配置中的实际参数）：
+### DC gain
 
-```yaml
-initial_points:
-  - {inpair_w: 12u, load_w: 6u, tail_w: 15u}
-  - {inpair_w: 16u}
-optimizer:
-  stagnation_rounds: 6
-```
+dc_gain(y, x) 对输入轴作最小二乘斜率，单位是输出/输入，例如 V/V；
+dc_gain(y, x, at=...) 返回指定点所在采样段的局部斜率。
+dc_offset(y, x) 返回拟合截距。若 x 省略，DC 分析轴会作为输入。
 
-也可通过 `run --initial-points seeds.json` 指定物理值字典列表，JSON 中使用 SI 数值，例如 `[{"inpair_w": 0.000012}]`。未提供的活跃参数按名义值补齐，未知名、越界、非整数及固定值冲突在仿真前报错。重复点不会重复仿真，失败仿真仍计入预算。显式 CLI `--scope` 将初值列表投影到该范围，其他范围保留配置中的 fixed／名义值；要保留特定背景工作点，应先在配置的 `fixed` 中明确填写。
+### FFT
 
-## 查表格式和计算边界
+enob、sndr_fft、snr_fft、thd_fft 和 sfdr_fft 固定采样起点时不自动
+寻找最佳相位。fund 是 FFT bin，不是 Hz。旧式显式 t0_lo/t0_hi 仍可扫描
+相位，并发出兼容性警告；需要保守约束时传 phase_mode="worst"。直接调用
+fft_metrics 等价于调用 spectrum(samples, fs, fund, window="rect",
+harmonics=5, bin_width=None)，返回字典后再选 ['sndr']、['enob'] 等标量。
 
-- NPZ：一维递增轴 `L, VSB, VDS, VGS`；标量 `W`、`polarity`（`n`／`p`）；`ids, gm` 的数组维度依次为 `(L, VSB, VDS, VGS)`。`temp`／`temperature` 可选，`gds, cgg` 及其他原生器件字段可选。不读取 pickle。
-- CSV：同名列；每行对应完整网格中的一个点，W 和 polarity 必须一致。支持 `#` 注释；缺失网格、重复点和不一致元数据报错。见 [`gmid_demo.csv`](../examples/gmid_demo.csv)。
-- 几何单位 m，电压 V，电流 A，跨导 S，电容 F。PMOS 按现有 gmid-tool 格式使用幅值。每个文件对应一个器件模型／工艺角／温度；本版不混合不同文件，也不猜测它们的工艺身份。
-- L/VDS/VSB 使用线性插值；gm/Id 逆查在相邻有效 VGS 样本之间求解线性插值后的 gm/ID 比值。拒绝外推、跨 NaN 空洞和多个不同 VGS 解。
-- `W = W_ref × ID_target / ID_LUT`，指定 gm 时同理。该宽度缩放假设对应器件在所选偏置附近可以按宽度缩放；短沟道、窄沟道、指布局和器件模型的几何规则仍需真实 PDK 仿真确认。器件 fT 不等于 OTA 的单位增益带宽，器件 gm/gds 也不等于完整 OTA 增益。
+### ADC 静态
 
-当前 Circuit 测试平台生成器仍以瞬态分析为主；本轮没有加入 OTA AC、噪声或 STB 分析，也没有运行真实 Spectre 设计优化。因此只报告功能验证，不报告收敛速度提升或满足某一 OTA 指标。
+adc_static(..., method="histogram") 和 code_density 只用于完整均匀
+ramp code-density；必须有足够样本并覆盖 code 0 和最大 code，端点饱和会被
+拒绝。任意瞬态码的直方图不能当作 INL。adc_transitions 映射完整的
+transition_metrics 边界数组，要求 2**bits + 1 个非递减边界；零宽度才是
+missing code，宽 code 不自动算缺码。端点模式以两端点定义 LSB，并把 INL
+归一化到端点连线，不会自动合成未测的外端点。decode_bits 映射 decode，bit 波形可用
+np.column_stack 组成 (samples, bits) 矩阵。
 
-## 下一阶段提案（尚未实现）
+## 可复用例子
 
-| 优先级 | 提案 | 对 OTA 的价值 | 验收方式 |
-| --- | --- | --- | --- |
-| P1 | 内置本地 Spectre DC／OP 查表生成器 | 从工艺模型直接得到 NMOS／PMOS LUT，复用现有文件查询能力 | 记录模型文件身份、section、温度、W、nf/m、轴网格及仿真版本；与人工单点 OP 对照；失败点可重试；断点只补缺失网格；预算与实际仿真数一致 |
-| P1 | OTA 独立测试平台与角色映射 | 显式标注输入对、镜像负载、尾源、输出级、补偿元件，加入偏置、增益、UGB、PM、噪声和功耗 | 固定引脚、负载、共模和反馈条件；先验证 OP，再验证 AC／稳定性；相位裕量不能仅取任意开环相位；至少一个有人工基准的 OTA 完整通过 |
-| P2 | 以 gm/Id、L、支路电流为设计变量 | 先生成一组物理上合理的尺寸候选，再用实际电路结果优化 | 保留匹配关系和 nf/m 约束，拒绝不可查表点；记录每次设计变量到 W/L 的映射；所有最终候选通过真实测试平台复核 |
-| P2 | 按功能组分阶段迭代 | 输入对 → 负载 → 偏置 → 补偿，降低每阶段同时变化的维数 | 全阶段共享预算和检查点；冻结背景采用当前最佳完整工作点；改变背景后重新评估候选；不得将背景不同的历史简单投影后混用 |
-| P3 | 多级筛选与跨运行知识复用 | OP 先筛失效点，再做 AC／瞬态／PVT，节约昂贵评估 | 明确每级成本和通过条件；仅在拓扑、PDK、测试平台、约束身份一致时复用缓存；用多随机种子比较达到同一指标的总成本与失败率 |
+~~~yaml
+metrics:
+  # 12-bit ADC 的半 LSB 建立时间；settled 是必须的通过条件
+  adc_settle: >-
+    settle_time(V('adc_in'), start=0, end=2u, final=0.9,
+                atol=0.5*0.9/2**12)
+  adc_ok: >-
+    settled(V('adc_in'), start=0, end=2u, final=0.9,
+            atol=0.5*0.9/2**12)
 
-建议按前两个 P1 顺序推进：先把查表来源做完整，再补 OTA 的真实性能测试，随后才让分组迭代自动执行。现有历史续跑主要校验参数范围和固定值，并没有完整的网表／模型身份指纹；改变 PDK、拓扑或测试平台时应使用新的工作目录。
+  gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
+  gain_db: "20*log10(abs(m['gain_vv']))"
 
-方法参考：Jespers 与 Murmann 的 *Systematic Design of Analog CMOS Circuits: Using Pre-Computed Lookup Tables*，作者维护的[资料仓库](https://github.com/bmurmann/Book-on-gm-ID-design)。本轮实现独立编写，没有复制该仓库代码；仓库内只提供合成演示数据。
+  sndr_db: "sndr_fft(V('adc_in'), 1G, 7, 256, t0=0)"
+  enob: "enob(V('adc_in'), 1G, 7, 256, t0=0)"
+
+  power_w: "avg(-V('vdd') * I('VDD'), 0, 2u)"
+  energy_j: "integ(-V('vdd') * I('VDD'), 0, 2u)"
+  fom: >-
+    m['sndr_db'] + m['gain_db'] - 10*log10(m['energy_j']/1p)
+
+constraints:
+  - {metric: adc_ok, min: 1}
+~~~
+
+DNL/INL 的一个表达式形态是：
+
+~~~yaml
+metrics:
+  dnl_peak: >-
+    adc_static(decode_bits(np.column_stack((V('b2'), V('b1'), V('b0')))),
+               3, method='histogram')['dnl_peak']
+  inl_peak: >-
+    adc_static(decode_bits(np.column_stack((V('b2'), V('b1'), V('b0')))),
+               3, method='histogram')['inl_peak']
+~~~
+
+这里的 bit 波形必须来自均匀 ramp 的采样，并满足端点覆盖和噪声限制；若只是
+任意 transient code 序列，表达式应被拒绝或改为专门的逻辑波形统计，而不能
+声称得到了 ADC INL。
+
+功耗和能量的单位分别是 W 和 J。电压电流的方向由 testbench 决定，常见的
+供电消耗写作 -V('vdd') * I('VDD')；请先用闭式或合成波形检查符号和范围。
+
+## 校验、可复现性和验证边界
+
+配置校验会检查分析块、表达式 AST、工程后缀、m 依赖和 analysis 归属；
+运行时还检查窗口、波形有限性和最终实标量。测量签名包含指标定义、分析配置
+和保存信号；签名变化或没有签名的旧结果会跳过，避免混用不同公式。
+
+闭式 transient/DC 波形、合成 ADC 码、端点覆盖、采样噪声和 FFT 解析比值可
+验证函数行为。它们不代表某个真实 PDK、OTA 或 Spectre 电路已经通过。真实
+设计仍需在目标模型、负载、参考、采样时序和 PVT 下复核。术语和测量边界参考
+[ADI MT-003](https://www.analog.com/media/en/training-seminars/tutorials/MT-003.pdf)、
+[ADI MT-010](https://www.analog.com/media/en/training-seminars/tutorials/MT-010.pdf)、
+[TI SLYT262A](https://www.ti.com/lit/an/slyt262a/slyt262a.pdf) 和
+[TI SBAA535](https://www.ti.com/lit/an/sbaa535/sbaa535.pdf)。
+
+## 可选的 gm/Id 和 scope 辅助
+
+已有的 gm/Id LUT 助手仍可读 NPZ/CSV，并把尺寸建议作为优化初值；scopes
+可以让 CLI/GUI 先检查一个 sub-cell 范围。它们不改变 Circuit metrics 的
+分析和有限标量规则，也不自动生成 PDK LUT、OTA AC testbench 或新的激励。
+
+合成演示可以离线查询：
+
+~~~bash
+./vcal gmid examples/gmid_demo.csv --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+~~~
+
+真实器件尺寸、短沟道效应、匹配、nf/m 和版图规则仍需相应 PDK 的仿真确认。
+
+## 远期方向（可选）
+
+在通用测量稳定后，可以考虑本地 Spectre OP/DC LUT 生成、OTA AC/稳定性测试
+平台、噪声和 PVT 角色映射，以及按功能组的设计变量筛选。这些是后续方向，
+当前优先级仍是让 tran、dc、FFT、ADC 静态和功耗/能量指标在明确边界下可复用。

@@ -233,6 +233,9 @@ class Engine:
         return True
 
     def _ingest(self, result, history=False):
+        if (history and self.spec.get("measurement_signature") and
+                result.get("measurement_signature") != self.spec["measurement_signature"]):
+            return False
         params = result.get("params") or {}
         if history and not self._inactive_params_compatible(params):
             return False
@@ -337,7 +340,7 @@ class Engine:
         if n:
             self._log(tr("resumed %d evaluations from history") % n)
         if skipped:
-            self._log(tr("skipped %d history records incompatible with bounds/fixed parameters") % skipped)
+            self._log(tr("skipped %d history records incompatible with measurements, bounds or fixed parameters") % skipped)
         return n
 
     @staticmethod
@@ -349,6 +352,8 @@ class Engine:
         cfg = {"space": self.space.params, "fixed": self.fixed,
                "objective": self.obj.to_cfg(), "constraints": [vars(c) for c in self.cons],
                "seed": self.seed, "batch": self.batch, "n_init": self.n_init}
+        if self.spec.get("measurement_signature"):
+            cfg["measurement_signature"] = self.spec["measurement_signature"]
         # Keep the old signature for the default configuration so checkpoints
         # written before seed support remain resumable.
         if self.initial_points:
@@ -539,6 +544,8 @@ class Engine:
             result = results[i] if i < len(results) and isinstance(results[i], dict) else {
                 "ok": False, "error": "evaluator returned no result"}
             result = {**result, "params": result.get("params") or params}
+            if self.spec.get("measurement_signature"):
+                result.setdefault("measurement_signature", self.spec["measurement_signature"])
             if not self._ingest(result):
                 self._ingest({**result, "params": params, "ok": False,
                               "metrics": None, "error": "evaluator returned incompatible parameters"})
