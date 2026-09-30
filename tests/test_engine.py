@@ -54,6 +54,73 @@ class Proposer:
         return np.array([[.01 * (len(X) + i)] for i in range(batch)]), False
 
 
+class SeedEvaluator:
+    def __init__(self):
+        self.calls = []
+        self.history_records = []
+        self.definition = {
+            "params": [
+                {"name": "x", "lo": 0., "hi": 1., "nominal": .5},
+                {"name": "y", "lo": 0., "hi": 4., "nominal": 2., "integer": True},
+                {"name": "disabled", "lo": 0., "hi": 1., "nominal": .2,
+                 "enabled": False},
+                {"name": "fixed", "lo": 0., "hi": 1., "nominal": .4,
+                 "enabled": False},
+            ],
+            "metrics": ["score", "power"],
+            "objective": {"metric": "score", "goal": "maximize"},
+            "constraints": [{"metric": "power", "max": 1}],
+        }
+
+    def spec(self):
+        return self.definition
+
+    def history(self):
+        return self.history_records
+
+    def evaluate_batch(self, params, parallel=None):
+        self.calls.append([dict(p) for p in params])
+        out = []
+        for p in params:
+            rec = {"params": dict(p), "ok": True,
+                   "trial": len(self.history_records),
+                   "metrics": {"score": p["x"], "power": .2}}
+            self.history_records.append(rec)
+            out.append(rec)
+        return out
+
+
+class FlatEvaluator(Evaluator):
+    def __init__(self, powers=None):
+        super().__init__()
+        self.powers = list(powers or [])
+
+    def evaluate_batch(self, params, parallel=None):
+        self.calls.append([dict(p) for p in params])
+        out = []
+        for p in params:
+            index = len(self.history_records)
+            power = self.powers[index] if index < len(self.powers) else .2
+            rec = {"params": dict(p), "ok": True,
+                   "trial": index,
+                   "metrics": {"score": 0., "power": power}}
+            self.history_records.append(rec)
+            out.append(rec)
+        return out
+
+
+class SpyProposer:
+    name = "spy"
+
+    def __init__(self, value=.1234567):
+        self.value = value
+        self.calls = []
+
+    def propose(self, X, y, C, batch, *args):
+        self.calls.append((len(X), batch))
+        return np.full((batch, X.shape[1]), self.value), False
+
+
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -63,6 +130,135 @@ class EngineTests(unittest.TestCase):
         eng = Engine(ev or Evaluator(), self.tmp.name, on_log=lambda _: None, **kwargs)
         eng.proposer = Proposer()
         return eng
+
+    def test_initial_seed_is_completed_before_nominal_and_fixed(self):
+        ev = SeedEvaluator()
+        eng = self.engine(ev, batch=1, n_init=2, fixed={"fixed": .4},
+                           initial_points=[{"x": .2}])
+        eng.run(2)
+        self.assertEqual(len(eng.records), 2)
+        seed, nominal = [call[0] for call in ev.calls]
+        self.assertEqual(seed["x"], .2)
+        self.assertEqual(seed["y"], 2)
+        self.assertEqual(seed["fixed"], .4)
+        self.assertNotIn("disabled", seed)
+        self.assertEqual(nominal["x"], .5)
+        self.assertEqual(nominal["y"], 2)
+        self.assertEqual(nominal["fixed"], .4)
+
+    def test_invalid_initial_seed_fails_before_any_evaluation(self):
+        bad_points = (
+            {"unknown": .1},
+            {"disabled": .1},
+            {"x": True},
+            {"x": float("nan")},
+            {"x": 2.},
+            {"y": 1.5},
+            {"fixed": .3},
+        )
+        for point in bad_points:
+            with self.subTest(point=point):
+                ev = SeedEvaluator()
+                with self.assertRaises(ValueError):
+                    self.engine(ev, fixed={"fixed": .4},
+                                initial_points=[point])
+                self.assertEqual(ev.calls, [])
+
+    def test_initial_seed_uses_spec_params_override_bounds(self):
+        spec_params = [{"name": "x", "lo": 2., "hi": 4., "nominal": 3.}]
+        bad = Evaluator()
+        bad.definition["params"][0].update(lo=0., hi=10., nominal=5.)
+        with self.assertRaises(ValueError):
+            self.engine(bad, spec_params=spec_params,
+                        initial_points=[{"x": 5.}])
+        self.assertEqual(bad.calls, [])
+
+        good = Evaluator()
+        good.definition["params"][0].update(lo=0., hi=10., nominal=5.)
+        eng = self.engine(good, batch=1, n_init=1,
+                          spec_params=spec_params,
+                          initial_points=[{"x": 3.}])
+        eng.run(1)
+        self.assertEqual(good.calls, [1])
+        self.assertEqual(good.history_records[0]["params"]["x"], 3.)
+
+    def test_duplicate_seeds_and_small_budget_do_not_overrun_budget(self):
+        ev = Evaluator()
+        eng = self.engine(ev, batch=4, n_init=20,
+                          initial_points=[{"x": .2}, {"x": .2}, {"x": .8}])
+        eng.run(2)
+        self.assertEqual(len(eng.records), 2)
+        self.assertEqual(sum(ev.calls), 2)
+        self.assertEqual([r["params"]["x"] for r in eng.records], [.2, .8])
+
+    def test_resume_skips_used_seed_and_prioritizes_unused_seed(self):
+        ev = Evaluator()
+        kwargs = {"batch": 1, "n_init": 1,
+                  "initial_points": [{"x": .2}, {"x": .8}]}
+        first = self.engine(ev, **kwargs)
+        first.run(1)
+        second = self.engine(ev, **kwargs)
+        self.assertEqual(second.resume(), 1)
+        second.run(3)
+        points = [r["params"]["x"] for r in ev.history_records]
+        self.assertEqual(points, [.2, .8, .5])
+        self.assertEqual(points.count(.2), 1)
+        self.assertEqual(sum(ev.calls), 3)
+
+    def test_stagnation_uses_global_sobol_on_next_batch_within_budget(self):
+        ev = FlatEvaluator()
+        eng = self.engine(ev, batch=1, n_init=1, stagnation_rounds=2)
+        proposer = SpyProposer()
+        eng.proposer = proposer
+        eng.run(4)
+        summary = eng.summary()
+        self.assertEqual(len(eng.records), 4)
+        self.assertEqual(sum(len(batch) for batch in ev.calls), 4)
+        # The first two optimization batches consult the proposer. Once the
+        # threshold is reached, the following batch is generated by Sobol.
+        self.assertEqual(len(proposer.calls), 2)
+        self.assertNotEqual(eng.records[-1]["params"]["x"], proposer.value)
+        self.assertEqual(summary["exploration_restarts"], 1)
+        self.assertFalse(summary["exploration_pending"])
+
+    def test_constraint_violation_improvement_resets_stagnation(self):
+        ev = FlatEvaluator([3., 3., 2.])
+        ev.definition["constraints"] = [{"metric": "power", "max": 0.}]
+        eng = self.engine(ev, batch=1, n_init=1, stagnation_rounds=2)
+        eng.proposer = SpyProposer()
+        eng.run(3)
+        summary = eng.summary()
+        self.assertEqual(summary["n_feasible"], 0)
+        self.assertEqual(summary["stagnation_count"], 0)
+        self.assertEqual(summary["exploration_restarts"], 0)
+        self.assertFalse(summary["exploration_pending"])
+
+    def test_checkpoint_restores_stagnation_state_and_continues_sobol(self):
+        ev = FlatEvaluator()
+        kwargs = {"batch": 1, "n_init": 1, "stagnation_rounds": 2}
+        first = self.engine(ev, **kwargs)
+        first.proposer = SpyProposer()
+        first.run(3)
+        before = first.summary()
+        self.assertEqual(before["stagnation_count"], 2)
+        self.assertEqual(before["exploration_restarts"], 0)
+        self.assertTrue(before["exploration_pending"])
+
+        resumed = self.engine(ev, **kwargs)
+        resumed_proposer = SpyProposer()
+        resumed.proposer = resumed_proposer
+        self.assertEqual(resumed.resume(), 3)
+        restored = resumed.summary()
+        self.assertEqual(restored["stagnation_count"], before["stagnation_count"])
+        self.assertEqual(restored["exploration_restarts"], before["exploration_restarts"])
+        self.assertEqual(restored["exploration_pending"], before["exploration_pending"])
+
+        resumed.run(4)
+        self.assertEqual(len(resumed.records), 4)
+        self.assertEqual(resumed_proposer.calls, [])
+        self.assertFalse(resumed.summary()["exploration_pending"])
+        self.assertEqual(resumed.summary()["exploration_restarts"], 1)
+        self.assertNotEqual(resumed.records[-1]["params"]["x"], resumed_proposer.value)
 
     def test_budget_below_initialization_and_partial_final_batch(self):
         eng = self.engine(batch=4, n_init=24)
@@ -126,6 +322,36 @@ class EngineTests(unittest.TestCase):
                                "metrics": {"score": .2, "power": .1}}]
         eng = self.engine(ev, spec_params=[ev.definition["params"][0]], fixed={"z": .4})
         self.assertEqual(eng.resume(), 0)
+
+    def test_resume_skips_changed_inactive_background_but_accepts_nominal(self):
+        ev = Evaluator()
+        ev.definition["params"].append({"name": "z", "lo": 0., "hi": 1.,
+                                         "nominal": .4})
+        ev.history_records = [
+            {"trial": 0, "params": {"x": .2, "z": .6}, "ok": True,
+             "metrics": {"score": .2, "power": .1}},
+            {"trial": 1, "params": {"x": .3, "z": .4}, "ok": True,
+             "metrics": {"score": .3, "power": .1}},
+        ]
+        eng = self.engine(ev, spec_params=[ev.definition["params"][0]])
+        self.assertEqual(eng.resume(), 1)
+        self.assertEqual(len(eng.records), 1)
+        self.assertEqual(eng.records[0]["trial"], 1)
+
+    def test_resume_accepts_omitted_inactive_background_without_nominal(self):
+        ev = Evaluator()
+        ev.definition["params"].append({"name": "z", "lo": 0., "hi": 1.,
+                                         "nominal": None})
+        ev.history_records = [
+            {"trial": 0, "params": {"x": .2}, "ok": True,
+             "metrics": {"score": .2, "power": .1}},
+            {"trial": 1, "params": {"x": .3, "z": .6}, "ok": True,
+             "metrics": {"score": .3, "power": .1}},
+        ]
+        eng = self.engine(ev, spec_params=[ev.definition["params"][0]])
+        self.assertEqual(eng.resume(), 1)
+        self.assertEqual(len(eng.records), 1)
+        self.assertEqual(eng.records[0]["trial"], 0)
 
     def test_resume_after_running_does_not_duplicate_own_records(self):
         eng = self.engine(n_init=3)

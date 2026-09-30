@@ -6,6 +6,7 @@
 import json
 import os
 import copy
+import math
 import threading
 
 import yaml
@@ -15,7 +16,7 @@ from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+    QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget)
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
@@ -34,6 +35,7 @@ from .evaluator import LocalEvaluator
 from .i18n import (LANGUAGES, configure_language, get_language,
                    set_language, tr)
 from .objective import Objective
+from .scopes import parameter_scopes, scope_inventory, select_scope
 
 GOALS = ["maximize", "minimize", "target"]
 GOAL_CN = {"maximize": "最大化", "minimize": "最小化", "target": "逼近目标值"}
@@ -148,6 +150,8 @@ class MainWindow(QMainWindow):
         self._record_states = []
         self._pick_points = {}
         self._fixed_values = {}
+        self._seed_extras = []
+        self._review = None
         self.metric_names = []
         self.plot_data = []          # (idx, headline, feasible, ok)
         self._build_ui()
@@ -224,7 +228,7 @@ class MainWindow(QMainWindow):
         self.log(tr("Language switched to %s") % LANGUAGES[code])
 
     def retranslate_ui(self):
-        dynamic = (self.lbl_cfg, self.lbl_status, self.lbl_point)
+        dynamic = (self.lbl_cfg, self.lbl_status, self.lbl_point, self.lbl_scope)
         for widget, setter, source in self._text_bindings:
             if widget in dynamic and setter == "setText":
                 continue
@@ -238,6 +242,7 @@ class MainWindow(QMainWindow):
         self.cmb_language.blockSignals(True)
         self.cmb_language.setCurrentIndex(self.cmb_language.findData(get_language()))
         self.cmb_language.blockSignals(False)
+        self.cmb_scope.setItemText(0, tr("All parameter scopes"))
         for row in range(self.tbl_obj.rowCount()):
             combo = self.tbl_obj.cellWidget(row, 1)
             for index, goal in enumerate(GOALS):
@@ -275,6 +280,9 @@ class MainWindow(QMainWindow):
             ["Noto Sans CJK JP", "Noto Sans CJK SC", "DejaVu Sans"]
             if get_language() == "ja" else
             ["Noto Sans CJK SC", "Noto Sans CJK JP", "DejaVu Sans"])
+        self.gmid_panel.retranslate_ui()
+        self._update_scope_view()
+        self._render_review()
         # Keep a user's zoom/pan while refreshing labels on an existing plot.
         limits = (self.ax.get_xlim(), self.ax.get_ylim()) if self._records else None
         self._redraw()
@@ -345,12 +353,28 @@ class MainWindow(QMainWindow):
         # ---- left tabs ----
         tabs = QTabWidget()
         # params
-        self.tbl_params = QTableWidget(0, 9)
+        parameters_widget = QWidget()
+        parameters_layout = QVBoxLayout(parameters_widget)
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(self._text_widget(QLabel, "Optimization scope:"))
+        self.cmb_scope = QComboBox()
+        self.cmb_scope.addItem(tr("All parameter scopes"), None)
+        self.cmb_scope.currentIndexChanged.connect(self._update_scope_view)
+        scope_row.addWidget(self.cmb_scope, 1)
+        self.btn_reuse_best = self._text_widget(QPushButton, "Use best as initial values")
+        self.btn_reuse_best.clicked.connect(self._reuse_best)
+        scope_row.addWidget(self.btn_reuse_best)
+        parameters_layout.addLayout(scope_row)
+        self.lbl_scope = QLabel()
+        self.lbl_scope.setWordWrap(True)
+        parameters_layout.addWidget(self.lbl_scope)
+        self.tbl_params = QTableWidget(0, 10)
         self._headers(self.tbl_params, ["启用", "参数", "器件", "属性", "下限", "上限", "log",
-             "整数", "nominal"])
+             "整数", "nominal", "Initial value"])
         self.tbl_params.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.Stretch)
-        self._tab(tabs, self.tbl_params, "参数空间")
+        parameters_layout.addWidget(self.tbl_params)
+        self._tab(tabs, parameters_widget, "参数空间")
         # objective + constraints
         w2 = QWidget()
         v2 = QVBoxLayout(w2)
@@ -405,6 +429,11 @@ class MainWindow(QMainWindow):
         self.chk_resume.setChecked(True)
         self.spin_seed = QSpinBox()
         self.spin_seed.setRange(0, 99999)
+        self.spin_stagnation = QSpinBox()
+        self.spin_stagnation.setRange(0, 10000)
+        self.spin_stagnation.setValue(6)
+        self._text_property(self.spin_stagnation, 'setToolTip',
+                            "After this many batches without progress, explore a new Sobol batch. The total budget stays unchanged.")
         rw = QWidget()
         rh = QHBoxLayout(rw)
         rh.setContentsMargins(0, 0, 0, 0)
@@ -421,8 +450,25 @@ class MainWindow(QMainWindow):
         self._form_row(f3, "DKL 启用样本数:", self.spin_dkl_after)
         f3.addRow(self.chk_resume)
         self._form_row(f3, "随机种子:", self.spin_seed)
+        self._form_row(f3, "Stagnant batches (0 = off):", self.spin_stagnation)
         self._form_row(f3, "远程GPU计算服务:", rw)
         self._tab(tabs, w3, "运行设置")
+        from .gmid_gui import GmIdPanel
+        self.gmid_panel = GmIdPanel()
+        self.gmid_panel.proposed.connect(self._apply_gmid_result)
+        gmid_scroll = QScrollArea()
+        gmid_scroll.setWidgetResizable(True)
+        gmid_scroll.setWidget(self.gmid_panel)
+        self._tab(tabs, gmid_scroll, "gm/Id assistant")
+        review_widget = QWidget()
+        review_layout = QVBoxLayout(review_widget)
+        self.btn_review = self._text_widget(QPushButton, "Review current run")
+        self.btn_review.clicked.connect(self._refresh_review)
+        review_layout.addWidget(self.btn_review)
+        self.txt_review = QPlainTextEdit()
+        self.txt_review.setReadOnly(True)
+        review_layout.addWidget(self.txt_review)
+        self._tab(tabs, review_widget, "Iteration review")
         self.tabs = tabs
 
         # ---- right side ----
@@ -514,11 +560,27 @@ class MainWindow(QMainWindow):
                                 self.cfg.get("simulator", "spectre"),
                                 len(spec["params"])))
         self.metric_names = spec["metrics"]
+        initial_points = spec.get("initial_points", [])
+        self._seed_extras = copy.deepcopy(initial_points[1:])
+        self._review = None
         self.cmb_metric.blockSignals(True)
         self.cmb_metric.clear()
         self.cmb_metric.addItems(self.metric_names)
         self.cmb_metric.blockSignals(False)
         self._fill_params(spec["params"])
+        if initial_points:
+            for row, param in enumerate(spec["params"]):
+                if param["name"] in initial_points[0]:
+                    self.tbl_params.item(row, 9).setText(fmt_num(initial_points[0][param["name"]]))
+        self.cmb_scope.blockSignals(True)
+        self.cmb_scope.clear()
+        self.cmb_scope.addItem(tr("All parameter scopes"), None)
+        for group in scope_inventory(spec["params"]):
+            self.cmb_scope.addItem(group["scope"], group["scope"])
+        self.cmb_scope.blockSignals(False)
+        self._update_scope_view()
+        self.gmid_panel.set_parameters(spec["params"])
+        self.spin_stagnation.setValue(spec.get("optimizer", {}).get("stagnation_rounds", 6))
         self._fill_objective(spec["objective"])
         self._fill_constraints(spec.get("constraints", []))
         self.plot_data = []
@@ -530,6 +592,7 @@ class MainWindow(QMainWindow):
         self._show_no_best()
         self._set_busy(False)
         self._redraw()
+        self._render_review()
         self.log(tr("已加载 %s") % path)
 
     def _fill_params(self, params):
@@ -554,6 +617,7 @@ class MainWindow(QMainWindow):
             if not p.get("enabled", True):
                 nominal = self._fixed_values.get(p["name"], nominal)
             t.setItem(r, 8, _num_item(nominal, editable=False))
+            t.setItem(r, 9, _num_item(nominal))
 
     def _obj_row_widgets(self, term=None, raw_scale=None):
         r = self.tbl_obj.rowCount()
@@ -628,7 +692,7 @@ class MainWindow(QMainWindow):
 
     def _collect_params(self):
         spec = self.evaluator.spec()["params"]
-        enabled, fixed = [], {}
+        edited, fixed, initial = [], {}, {}
         self._edited_param_bounds = {}
         for r, p in enumerate(spec):
             name = p.get("name", tr("第%d行") % (r + 1))
@@ -644,12 +708,13 @@ class MainWindow(QMainWindow):
             q = dict(p)
             q["lo"] = lo
             q["hi"] = hi
-            if self.tbl_params.item(r, 0).checkState() == Qt.Checked:
-                q["enabled"] = True
-                enabled.append(q)
-            else:
-                q["enabled"] = False
-                value = self._fixed_values.get(p["name"], p.get("nominal"))
+            value = self._read_num(self.tbl_params.item(r, 9), tr("Initial value") + " " + name)
+            if value is not None:
+                initial[name] = value
+            q["enabled"] = self.tbl_params.item(r, 0).checkState() == Qt.Checked
+            edited.append(q)
+            if not q["enabled"]:
+                value = initial.get(name, self._fixed_values.get(name, p.get("nominal")))
                 if value is not None:
                     value = float(value)
                     if not lo <= value <= hi:
@@ -657,7 +722,141 @@ class MainWindow(QMainWindow):
                                          (name, fmt_num(value), fmt_num(lo),
                                           fmt_num(hi)))
                     fixed[p["name"]] = value
-        return enabled, fixed
+        return select_scope(edited, self.cmb_scope.currentData(), fixed=fixed, initial_values=initial)
+
+    def _collect_seed_points(self, enabled, fixed):
+        names = {p["name"] for p in enabled}
+        first = {p["name"]: p["nominal"] for p in enabled if p.get("nominal") is not None}
+        points = [{**fixed, **first}] if first else []
+        for point in self._seed_extras:
+            points.append({**{name: value for name, value in point.items() if name in names}, **fixed})
+        return points
+
+    def _update_scope_view(self, *_):
+        if not hasattr(self, "tbl_params"):
+            return
+        if self.evaluator is None:
+            self.lbl_scope.setText(tr("Load a circuit to select its parameter scope."))
+            return
+        selected = self.cmb_scope.currentData()
+        local, shared = 0, 0
+        for row, p in enumerate(self.evaluator.spec()["params"]):
+            scopes = parameter_scopes(p)
+            visible = selected is None or selected in scopes
+            self.tbl_params.setRowHidden(row, not visible)
+            local += bool(visible and (selected is None or scopes == (selected,)))
+            shared += bool(selected is not None and selected in scopes and len(scopes) > 1)
+            item = self.tbl_params.item(row, 0)
+            if item is not None:
+                flags = item.flags() | Qt.ItemIsEnabled
+                if selected is not None and scopes != (selected,):
+                    flags &= ~Qt.ItemIsEnabled
+                item.setFlags(flags)
+        if selected is None:
+            self.lbl_scope.setText(tr("All scopes: %d parameters. Initial values do not edit the source netlist.") % local)
+        else:
+            self.lbl_scope.setText(tr("%s: %d local parameters, %d shared parameters held fixed. Other scopes keep their initial/netlist values. The existing testbench is used; all instances of this subcircuit master change together.") %
+                                   (selected, local, shared))
+
+    def _apply_initial_values(self, values):
+        if self.evaluator is None:
+            raise ValueError(tr("先打开电路配置 YAML"))
+        rows = {p["name"]: (r, p) for r, p in enumerate(self.evaluator.spec()["params"])}
+        updates = []
+        for name, value in values.items():
+            if name not in rows:
+                raise ValueError(tr("Unknown initial-value parameter: %s") % name)
+            row, p = rows[name]
+            lo = self._read_num(self.tbl_params.item(row, 4), name, p["lo"])
+            hi = self._read_num(self.tbl_params.item(row, 5), name, p["hi"])
+            if isinstance(value, bool) or not math.isfinite(float(value)) or not lo <= float(value) <= hi:
+                raise ValueError(tr("Suggested %s=%g is outside [%g, %g]; edit the bounds or sizing target first.") %
+                                 (name, float(value), lo, hi))
+            if p.get("integer") and not float(value).is_integer():
+                raise ValueError(tr("Initial value for %s must be an integer.") % name)
+            updates.append((row, float(value)))
+        # Validate the complete proposal before changing any table cell.
+        for row, value in updates:
+            self.tbl_params.item(row, 9).setText(fmt_num(value))
+
+    def _apply_gmid_result(self, proposal):
+        if self._has_active_task():
+            return
+        try:
+            self._apply_initial_values(proposal["params"])
+        except (ValueError, KeyError, TypeError) as exc:
+            QMessageBox.warning(self, tr("配置错误"), str(exc))
+            return
+        self.log(tr("gm/Id initial values applied: %s") % json.dumps(proposal["params"], ensure_ascii=False))
+        self.tabs.setCurrentIndex(0)
+
+    def _reuse_best(self):
+        if self._has_active_task():
+            return
+        from .review import analyze_records
+        try:
+            result = analyze_records(self._result_records(), self._collect_objective(),
+                                     self._collect_constraints())
+            best = result["best_record"]
+        except (ValueError, TypeError, KeyError) as exc:
+            QMessageBox.warning(self, tr("配置错误"), str(exc))
+            return
+        if best is None:
+            QMessageBox.information(self, tr("提示"), tr("No feasible best point is available yet."))
+            return
+        try:
+            self._apply_initial_values(best.get("params") or {})
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, tr("配置错误"), str(exc))
+            return
+        self.log(tr("Best feasible point copied to initial values. Raise the total budget to continue, or disable resume for a fresh run."))
+
+    def _refresh_review(self):
+        if self.evaluator is None:
+            return
+        from .review import analyze_records
+        try:
+            objective = getattr(self, "_objective_snapshot", None) or self._collect_objective()
+            constraints = (getattr(self, "_constraints_snapshot", []) if self._records else
+                           self._collect_constraints())
+            self._review = analyze_records(self._result_records(), objective, constraints,
+                                          self.evaluator.spec()["params"])
+        except Exception as exc:
+            self.txt_review.setPlainText(tr("Review failed: %s") % exc)
+            return
+        self._render_review()
+
+    def _render_review(self):
+        if self._review is None:
+            self.txt_review.setPlainText(tr("Review the current run to inspect failures, feasibility, stagnation, and parameter associations."))
+            return
+        result = self._review
+        lines = [tr("Evaluations: %d | successful: %d | feasible: %d | failed: %d") %
+                 (result["n"], result["n_ok"], result["n_feasible"], result["n_failed"]),
+                 tr("Repeated parameter points: %d") % result["repeated_points"]]
+        if result["evaluations_since_improvement"] is not None:
+            lines.append(tr("Evaluations since last feasible improvement: %d") % result["evaluations_since_improvement"])
+        advice = {
+            "run_nominal": "Run the nominal point first to check the testbench and metrics.",
+            "inspect_failures": "Inspect failed simulation logs before spending more evaluations.",
+            "check_constraints": "No feasible point yet: review bias ranges and constraint definitions.",
+            "reuse_best": "Reuse the feasible best point as the initial value for the next design round.",
+            "enable_exploration": "Progress has stalled: enable stagnation exploration or review the search bounds.",
+            "select_scope": "Many parameters vary at once: consider one subcell scope at a time.",
+            "collect_more": "Too few valid samples for parameter-association estimates.",
+        }
+        lines += ["", tr("Suggested next steps:")]
+        lines += ["• " + tr(advice[code]) for code in result["advice"]]
+        if result["associations"]:
+            lines += ["", tr("Historical rank association with the objective (not causal sensitivity):")]
+            lines.append(tr("Population: feasible points") if result["association_population"] == "feasible"
+                         else tr("Population: all valid points, including constraint violations"))
+            lines += ["%s: ρ=%+.3f (n=%d)" % (entry["parameter"], entry["rho"], entry["n"])
+                      for entry in result["associations"][:12]]
+        if result["errors"]:
+            lines += ["", tr("Most frequent simulation errors:")]
+            lines += ["%d × %s" % (entry["count"], entry["error"]) for entry in result["errors"]]
+        self.txt_review.setPlainText("\n".join(lines))
 
     def _collect_objective(self):
         terms = []
@@ -737,6 +936,8 @@ class MainWindow(QMainWindow):
             # Keep fixed nominal values separate from params so Circuit can
             # merge them into every evaluation while retaining all rows.
             cfg["fixed"] = fixed
+            cfg["initial_points"] = self._collect_seed_points(enabled, fixed)
+            cfg.setdefault("optimizer", {})["stagnation_rounds"] = self.spin_stagnation.value()
             obj = self._collect_objective()
             cfg["objective"] = obj[0] if len(obj) == 1 else obj
             cfg["constraints"] = self._collect_constraints()
@@ -786,6 +987,8 @@ class MainWindow(QMainWindow):
             "budget": self.spin_budget.value(),
             "resume": self.chk_resume.isChecked(),
             "max_jobs": self.spin_jobs.value(),
+            "initial_points": self._collect_seed_points(enabled, fixed),
+            "stagnation_rounds": self.spin_stagnation.value(),
         }
 
     def _apply_runtime_bounds(self, enabled):
@@ -823,7 +1026,9 @@ class MainWindow(QMainWindow):
             on_log=on_log, on_record=on_record,
             spec_params=copy.deepcopy(snapshot["spec_params"]),
             fixed=copy.deepcopy(snapshot["fixed"]),
-            remote_gpu=snapshot["remote_gpu"])
+            remote_gpu=snapshot["remote_gpu"],
+            initial_points=copy.deepcopy(snapshot.get("initial_points", [])),
+            stagnation_rounds=snapshot.get("stagnation_rounds", 0))
 
     def test_remote(self):
         if self._has_active_task():
@@ -844,8 +1049,10 @@ class MainWindow(QMainWindow):
         if not self.evaluator or self._has_active_task():
             return
         try:
-            _, fixed = self._collect_params()
-            params = copy.deepcopy(fixed)
+            enabled, fixed = self._collect_params()
+            points = self._collect_seed_points(enabled, fixed)
+            params = copy.deepcopy(points[0] if points else fixed)
+            self._apply_runtime_bounds(enabled)
         except Exception as e:
             self.log(tr("配置错误: %s") % e)
             QMessageBox.critical(self, tr("配置错误"), str(e))
@@ -1210,6 +1417,7 @@ class MainWindow(QMainWindow):
                 self._update_status(self._last_summary, done=True)
             else:
                 self._set_status("状态：运行失败（详见日志）")
+        self._refresh_review()
         self._maybe_close_after_stop()
 
     def _nominal_finished(self):

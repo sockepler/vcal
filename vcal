@@ -45,6 +45,9 @@ Usage:
   vcal gui [--lang zh|ja|en]
   vcal run [--lang zh|ja|en] <circuit.yaml> [options]
   vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal scopes [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal review [--lang zh|ja|en] <history.jsonl> --config <circuit.yaml> [--json]
+  vcal gmid [--lang zh|ja|en] <LUT> [options]
   vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
   vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
 
@@ -57,6 +60,9 @@ EOF
   vcal gui [--lang zh|ja|en]
   vcal run [--lang zh|ja|en] <circuit.yaml> [オプション]
   vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal scopes [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal review [--lang zh|ja|en] <history.jsonl> --config <circuit.yaml> [--json]
+  vcal gmid [--lang zh|ja|en] <LUT> [オプション]
   vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
   vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
 
@@ -69,6 +75,9 @@ EOF
   vcal gui [--lang zh|ja|en]
   vcal run [--lang zh|ja|en] <circuit.yaml> [选项]
   vcal check [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal scopes [--lang zh|ja|en] <circuit.yaml> [--json]
+  vcal review [--lang zh|ja|en] <history.jsonl> --config <circuit.yaml> [--json]
+  vcal gmid [--lang zh|ja|en] <LUT> [选项]
   vcal serve-gpu [--lang zh|ja|en] [--port N] [--host HOST]
   vcal install [--lang zh|ja|en] [auto|cuda|rocm|cpu]
 
@@ -193,7 +202,7 @@ case "$cmd" in
                 ;;
         esac
         ;;
-    gui|run|check|serve-gpu)
+    gui|run|check|scopes|review|gmid|serve-gpu)
         ;;
     *)
         usage "$shell_lang" >&2
@@ -230,7 +239,7 @@ if [ -z "$PY" ]; then
 fi
 
 case "$cmd" in
-    gui|run|check)
+    gui|run|check|scopes|review|gmid)
         if [ "$explicit_lang" -eq 1 ]; then
             exec env -u LD_LIBRARY_PATH "$PY" -m optlocal --lang "$shell_lang" "$cmd" "${forwarded[@]}"
         fi

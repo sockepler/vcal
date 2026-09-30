@@ -68,6 +68,10 @@ class Circuit:
             if p.get("integer") and not v.is_integer():
                 raise ValueError("fixed.%s must be an integer" % name)
             self.fixed[name] = v
+        for point in self.cfg.get("initial_points", []):
+            for name, value in point.items():
+                if name in self.fixed and not math.isclose(value, self.fixed[name], rel_tol=1e-9, abs_tol=0):
+                    raise ValueError("initial_points conflicts with fixed parameter: " + name)
         # Verify model paths and every selected process corner before simulation.
         for corner in self.cfg.get("corners") or [{}]:
             for lib in corner.get("libs") or self._libs_for(corner.get("pdk_corner")):
@@ -145,7 +149,7 @@ class Circuit:
 
     def spec(self):
         """What the optimizer client needs."""
-        return {
+        spec = {
             "circuit": self.name,
             "params": [
                 {"name": p["name"],
@@ -164,6 +168,10 @@ class Circuit:
             "constraints": self.cfg.get("constraints", []),
             "fixed": self.fixed,
         }
+        for key in ("initial_points", "optimizer"):
+            if key in self.cfg:
+                spec[key] = copy.deepcopy(self.cfg[key])
+        return spec
 
     # ---------- evaluation ----------
     def apply_params(self, values, out_netlist):

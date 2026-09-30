@@ -65,6 +65,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("Launch graphical interface", outputs["en"])
         for text in outputs.values():
             self.assertIn("--lang LANG", text)
+            self.assertIn("scopes", text)
+            self.assertIn("review", text)
+            self.assertIn("gmid", text)
 
     def test_lang_is_accepted_before_or_after_subcommand_and_forwards_gui(self):
         calls = []
@@ -219,6 +222,172 @@ class CliTests(unittest.TestCase):
         self.assertIn("missing device name", err.getvalue())
         self.assertIn("metric references unknown node", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
+
+    def test_gmid_parses_engineering_values_and_emits_stable_json(self):
+        gmid_module = types.ModuleType("optlocal.gmid")
+        calls = []
+
+        class FakeTable:
+            @classmethod
+            def load(cls, path):
+                calls.append(("load", path))
+                return cls()
+
+            def size_for(self, length, vds, vsb, *, gmid, ids=None, gm=None):
+                calls.append(("size_for", length, vds, vsb, gmid, ids, gm))
+                return {"z": 2.0, "a": 1.0}
+
+        gmid_module.GmIdTable = FakeTable
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"optlocal.gmid": gmid_module}), \
+                contextlib.redirect_stdout(out):
+            code = cli.main([
+                "gmid", "table.csv", "--length", "180n", "--vds", "0.9",
+                "--vsb", "0", "--gmid", "15", "--id", "20u", "--json",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), {"a": 1.0, "z": 2.0})
+        self.assertEqual(calls[0], ("load", "table.csv"))
+        self.assertEqual(calls[1][0], "size_for")
+        for actual, expected in zip(calls[1][1:],
+                                    (180e-9, 0.9, 0.0, 15.0, 20e-6, None)):
+            if expected is None:
+                self.assertIsNone(actual)
+            else:
+                self.assertAlmostEqual(actual, expected)
+
+        with self.assertRaises(SystemExit) as missing:
+            cli.main(["gmid", "table.csv", "--length", "1", "--vds", "1",
+                      "--gmid", "10"])
+        self.assertEqual(missing.exception.code, 2)
+        with self.assertRaises(SystemExit) as both:
+            cli.main(["gmid", "table.csv", "--length", "1", "--vds", "1",
+                      "--gmid", "10", "--id", "1", "--gm", "2"])
+        self.assertEqual(both.exception.code, 2)
+
+    def test_scopes_and_review_are_read_only_circuit_operations(self):
+        circuit_module = types.ModuleType("optserver.circuit")
+        fake_pkg = types.ModuleType("optserver")
+        fake_pkg.__path__ = []
+        constructed = []
+        spec = {
+            "params": [{"name": "w", "enabled": True,
+                        "devices": ["amp/M1"]}],
+            "objective": {"metric": "gain", "goal": "maximize"},
+            "constraints": [{"metric": "power", "max": 2}],
+        }
+
+        class FakeCircuit:
+            def __init__(self, path):
+                constructed.append(path)
+
+            def spec(self):
+                return spec
+
+        circuit_module.Circuit = FakeCircuit
+        scopes_module = types.ModuleType("optlocal.scopes")
+        scopes_module.scope_inventory = lambda params: [{
+            "scope": "amp", "parameters": [params[0]["name"]],
+            "shared": [], "devices": ["M1"],
+        }]
+        evaluator_module = types.ModuleType("optlocal.evaluator")
+        review_module = types.ModuleType("optlocal.review")
+        review_calls = []
+        evaluator_module.read_history = lambda path: [{"path": path}]
+        review_module.analyze_records = lambda records, objective, constraints, params: (
+            review_calls.append((records, objective, constraints, params)) or
+            {"n": len(records), "ok": True}
+        )
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, \
+                mock.patch.dict(sys.modules, {
+                    "optserver": fake_pkg,
+                    "optserver.circuit": circuit_module,
+                    "optlocal.scopes": scopes_module,
+                    "optlocal.evaluator": evaluator_module,
+                    "optlocal.review": review_module,
+                }):
+            cfg = str(Path(tmp) / "circuit.yaml")
+            history = str(Path(tmp) / "history.jsonl")
+            Path(cfg).write_text("ignored")
+            Path(history).write_text("ignored")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["scopes", cfg, "--json"]), 0)
+            self.assertEqual(json.loads(out.getvalue())[0]["scope"], "amp")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main([
+                    "review", history, "--config", cfg, "--json",
+                ]), 0)
+            self.assertEqual(json.loads(out.getvalue())["n"], 1)
+        self.assertEqual(constructed, [cfg, cfg])
+        self.assertEqual(review_calls[0][1:],
+                         (spec["objective"], spec["constraints"], spec["params"]))
+
+    def test_run_passes_scope_seed_and_stagnation_to_engine(self):
+        engine_module = types.ModuleType("optlocal.engine")
+        evaluator_module = types.ModuleType("optlocal.evaluator")
+        engines = []
+        spec = {
+            "params": [
+                {"name": "a", "lo": 0., "hi": 10., "nominal": 1.,
+                 "enabled": True, "devices": ["cell_a/M1"]},
+                {"name": "b", "lo": 0., "hi": 10., "nominal": 2.,
+                 "enabled": True, "devices": ["cell_b/M1"]},
+                {"name": "shared", "lo": 0., "hi": 10., "nominal": 3.,
+                 "enabled": True,
+                 "devices": ["cell_a/M2", "cell_b/M2"]},
+            ],
+            "fixed": {}, "objective": {"metric": "gain", "goal": "maximize"},
+            "constraints": [], "optimizer": {"stagnation_rounds": 8},
+        }
+
+        class FakeEvaluator:
+            def __init__(self, path, max_jobs, workroot):
+                self.root = tempfile.gettempdir()
+
+            def spec(self):
+                return spec
+
+        class FakeEngine:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                engines.append(self)
+
+            def resume(self):
+                pass
+
+            def run(self, budget):
+                return 0, {"trial": 0, "metrics": {"gain": 1.0}}
+
+            def feasible_mask(self):
+                return [True]
+
+        engine_module.Engine = FakeEngine
+        evaluator_module.LocalEvaluator = FakeEvaluator
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp, \
+                mock.patch.dict(sys.modules, {
+                    "optlocal.engine": engine_module,
+                    "optlocal.evaluator": evaluator_module,
+                }), mock.patch("optlocal.__main__._emit", return_value=None):
+            points = Path(tmp) / "points.json"
+            points.write_text(json.dumps([{
+                "a": 4., "b": 9., "shared": 8.,
+            }]))
+            code = cli.main([
+                "run", str(Path(tmp) / "circuit.yaml"), "--scope", "cell_a",
+                "--initial-points", str(points), "--stagnation-rounds", "2",
+                "--seed", "17", "--budget", "1", "--batch", "1",
+                "--init", "1", "--dkl-after", "1", "--no-resume",
+            ])
+        self.assertEqual(code, 0)
+        kwargs = engines[0].kwargs
+        self.assertEqual(kwargs["seed"], 17)
+        self.assertEqual(kwargs["stagnation_rounds"], 2)
+        self.assertEqual([p["name"] for p in kwargs["spec_params"]], ["a"])
+        self.assertEqual(kwargs["fixed"], {"b": 2.0, "shared": 3.0})
+        self.assertEqual(kwargs["initial_points"],
+                         [{"a": 4.0, "b": 2.0, "shared": 3.0}])
 
     def test_keyboard_interrupt_saves_best_and_returns_130(self):
         engine_module = types.ModuleType("optlocal.engine")

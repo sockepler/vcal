@@ -70,6 +70,44 @@ CLI options: `--budget N` total evals (never more than N), `--batch q` parallel 
 ranges, and metric references. It does not validate waveform-expression syntax
 or run a real simulation.
 
+## OTA workflow: gm/Id, scopes, and review
+
+See [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md) for the complete workflow. The
+GUI gm/Id panel loads an existing NPZ/CSV LUT; the synthetic table in this
+repository is only a flow demo and contains no PDK data:
+
+```bash
+./vcal gmid examples/gmid_demo.csv \
+  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+```
+
+The CLI can inspect parameter groups, run one sub-cell scope, and review a
+history offline:
+
+```bash
+./vcal scopes <circuit.yaml> --json
+./vcal run <circuit.yaml> --scope <scope-name> \
+  --stagnation-rounds 6 --initial-points points.json --budget 100
+./vcal review <history.jsonl> --config <circuit.yaml> --json
+```
+
+Without `--scope`, all enabled parameters are optimized. With a scope selected,
+only parameters whose every `devices` entry belongs to that scope remain active;
+shared and unselected-scope parameters use configured fixed/nominal values in
+the CLI, or the initial-value column in the GUI.
+`--initial-points` takes a JSON list of physical SI-value mappings, and
+`--stagnation-rounds` is the non-negative number of stagnant rounds before global
+exploration is queued. The GUI path is: open the gm/Id LUT → map width/length
+parameters → calculate and apply initial values → select a scope → start the
+optimization with the existing configuration → review the history with `review`.
+
+In `params.devices`, `scope/instance` identifies a device inside a subcircuit
+master; changing that master affects all of its instances. Scope selection does
+not create new stimuli or a new testbench: simulations still use the configured
+netlist and existing testbench. This version does not automatically generate a
+PDK LUT or an OTA AC testbench; the synthetic LUT and examples here do not claim
+real Spectre testing or performance results.
+
 ### Interface language
 
 The language drop-down at the top of the GUI switches between Chinese, Japanese,

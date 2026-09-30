@@ -57,6 +57,37 @@ CLI 选项：`--budget N` 总评估数（不会超过 N）、`--batch q` 并行�
 `check` 只检查配置结构、引用文件、器件、参数范围和指标引用，不检查波形
 表达式语法，也不运行真实仿真。
 
+## OTA 工作流：gm/Id、scope 与复盘
+
+完整步骤见 [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md)。GUI 的 gm/Id 面板可以
+加载已有的 NPZ/CSV LUT；仓库中的合成演示表只用于验证流程，不包含 PDK 数据：
+
+```bash
+./vcal gmid examples/gmid_demo.csv \
+  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+```
+
+CLI 还可以查看参数分组、按一个子 cell scope 运行，以及离线复盘历史：
+
+```bash
+./vcal scopes <circuit.yaml> --json
+./vcal run <circuit.yaml> --scope <scope-name> \
+  --stagnation-rounds 6 --initial-points points.json --budget 100
+./vcal review <history.jsonl> --config <circuit.yaml> --json
+```
+
+省略 `--scope` 会优化全部启用参数；指定 scope 后，只有所有 `devices` 都属于该
+scope 的参数保持活跃。CLI 中，共享参数和其他范围使用配置的 fixed／名义值；
+GUI 中使用初值列的值。`--initial-points`
+是包含物理 SI 数值映射的 JSON 列表，`--stagnation-rounds` 是触发全局探索的非负
+停滞轮数。GUI 的路径是：打开 gm/Id LUT → 选择宽度/长度映射参数 → 计算并应用为
+初值 → 选择 scope → 使用现有配置开始优化 → 用 `review` 复盘历史。
+
+`params.devices` 中的 `scope/instance` 指向 subckt master 内的器件；修改该 master
+会影响它的全部实例。scope 选择不会生成新的激励或测试平台，仿真仍使用配置中的
+现有网表和 testbench。此版本不会自动生成 PDK LUT，也不会自动生成 OTA AC 测试平台；
+合成 LUT 和本文示例不代表真实 Spectre 测试或性能结果。
+
 ### 界面语言
 
 GUI 顶部的语言下拉框可即时切换中文、日文或英文；选择语言后会立即刷新界面，

@@ -82,6 +82,37 @@ def validate_config(cfg):
                   label + ": integer range contains no integer")
         except ValueError as exc:
             errors.append(str(exc))
+    initial_points = cfg.get("initial_points", [])
+    if not isinstance(initial_points, list):
+        errors.append("initial_points must be a list of parameter mappings")
+    else:
+        known_params = {p.get("name"): p for p in params if isinstance(p, dict)
+                        and isinstance(p.get("name"), str)}
+        for i, point in enumerate(initial_points):
+            if not isinstance(point, dict):
+                errors.append("initial_points[%d] must be a parameter mapping" % i)
+                continue
+            for name, value in list(point.items()):
+                label = "initial_points[%d].%s" % (i, name)
+                if name not in known_params:
+                    errors.append(label + ": unknown parameter")
+                    continue
+                p = known_params[name]
+                try:
+                    value = number(value, label)
+                    lo, hi = number(p["lo"], label), number(p["hi"], label)
+                    check(lo <= value <= hi, label + ": outside parameter bounds")
+                    check(not p.get("integer") or value.is_integer(), label + ": must be an integer")
+                    point[name] = value
+                except (ValueError, KeyError) as exc:
+                    errors.append(str(exc))
+    optimizer = cfg.get("optimizer", {})
+    if not isinstance(optimizer, dict):
+        errors.append("optimizer must be a mapping")
+    elif "stagnation_rounds" in optimizer:
+        value = optimizer["stagnation_rounds"]
+        check(isinstance(value, int) and not isinstance(value, bool) and value >= 0,
+              "optimizer.stagnation_rounds must be a nonnegative integer")
     metrics = cfg.get("metrics")
     if not isinstance(metrics, dict) or not metrics:
         errors.append("metrics must be a nonempty mapping")

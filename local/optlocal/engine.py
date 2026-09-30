@@ -15,6 +15,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -88,10 +89,14 @@ class Engine:
     def __init__(self, evaluator, outdir, objective=None, constraints=None,
                  batch=4, n_init=24, device="auto", use_dkl=True,
                  dkl_after=48, seed=0, on_log=None, on_record=None,
-                 spec_params=None, fixed=None, remote_gpu=None):
+                 spec_params=None, fixed=None, remote_gpu=None,
+                 initial_points=None, stagnation_rounds=0):
         for name, value in (("batch", batch), ("n_init", n_init), ("dkl_after", dkl_after)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError("%s must be a positive integer" % name)
+        if (isinstance(stagnation_rounds, bool) or
+                not isinstance(stagnation_rounds, int) or stagnation_rounds < 0):
+            raise ValueError("stagnation_rounds must be a nonnegative integer")
         self.ev = evaluator
         self.outdir = outdir
         os.makedirs(outdir, exist_ok=True)
@@ -123,8 +128,13 @@ class Engine:
             for metric in [t.metric for t in self.obj.terms] + [c.metric for c in self.cons]:
                 if metric not in self.spec["metrics"]:
                     raise ValueError("unknown objective/constraint metric: %s" % metric)
+        raw_initial_points = (self.spec.get("initial_points", [])
+                              if initial_points is None else initial_points)
+        self.initial_points = self._validate_initial_points(raw_initial_points,
+                                                            all_params)
         self.batch = batch
         self.n_init = n_init
+        self.stagnation_rounds = stagnation_rounds
         self.use_dkl = use_dkl
         self.dkl_after = dkl_after
         self.device, self.device_name = pick_device(device)
@@ -148,10 +158,84 @@ class Engine:
         self.budget = None
         self._seen = set()
         self._resumed_ids = set()
+        self.stagnation_count = 0
+        self.exploration_restarts = 0
+        self.exploration_pending = False
+
+    def _validate_initial_points(self, points, all_params):
+        """Validate and complete physical seed points before any evaluation."""
+        if points is None:
+            points = []
+        if not isinstance(points, list):
+            raise ValueError("initial_points must be a list")
+        nominal = self.space.to_physical(self.space.nominal_unit())
+        active = {p["name"]: p for p in self.space.params}
+        out = []
+        for index, raw in enumerate(points):
+            if not isinstance(raw, Mapping):
+                raise ValueError("initial_points[%d] must be a mapping" % index)
+            point = dict(nominal)
+            for name, value in raw.items():
+                if name not in all_params:
+                    raise ValueError("initial_points[%d] has unknown parameter: %s"
+                                     % (index, name))
+                # Fixed parameters may be repeated in a complete physical
+                # point, but their value must agree with the run configuration.
+                if name in self.fixed:
+                    value = _finite(value, "initial_points[%d].%s" % (index, name))
+                    if not math.isclose(float(value), float(self.fixed[name]),
+                                        rel_tol=1e-9, abs_tol=0.0):
+                        raise ValueError("initial_points[%d].%s conflicts with fixed parameter"
+                                         % (index, name))
+                    continue
+                if name not in active:
+                    raise ValueError("initial_points[%d] parameter is inactive: %s"
+                                     % (index, name))
+                value = _finite(value, "initial_points[%d].%s" % (index, name))
+                p = active[name]
+                if (not p["lo"] <= value <= p["hi"] or
+                        (p.get("integer") and not value.is_integer())):
+                    raise ValueError("initial_points[%d].%s is outside its allowed range"
+                                     % (index, name))
+                point[name] = value
+            point.update(self.fixed)
+            out.append(point)
+        return out
 
     # ---------- data ----------
-    def _ingest(self, result):
+    def _inactive_params_compatible(self, params):
+        """Keep history backgrounds outside the selected scope compatible.
+
+        LocalEvaluator records a known nominal for an omitted inactive
+        parameter, while it omits inactive parameters whose nominal is
+        unknown.  Match that representation so a changed background cannot
+        enter the active-parameter model.
+        """
+        selected = set(self.space.names) | set(self.fixed)
+        for spec in self.spec.get("params", []):
+            name = spec.get("name") if isinstance(spec, dict) else None
+            if not name or name in selected:
+                continue
+            nominal = spec.get("nominal")
+            if nominal is None:
+                if name in params:
+                    return False
+                continue
+            if name not in params:
+                return False
+            try:
+                value = _finite(params[name], "param " + name)
+                nominal = _finite(nominal, "nominal " + name)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isclose(value, nominal, rel_tol=1e-9, abs_tol=0.0):
+                return False
+        return True
+
+    def _ingest(self, result, history=False):
         params = result.get("params") or {}
+        if history and not self._inactive_params_compatible(params):
+            return False
         full = {p["name"]: params.get(p["name"], p.get("nominal"))
                 for p in self.space.params}
         if any(v is None for v in full.values()):
@@ -204,7 +288,7 @@ class Engine:
             if identity in self._resumed_ids:
                 continue
             self._resumed_ids.add(identity)
-            if self._ingest(r):
+            if self._ingest(r, history=True):
                 n += 1
             else:
                 skipped += 1
@@ -222,11 +306,29 @@ class Engine:
                         value = state["turbo"][key]
                         if value is not None:
                             setattr(self.turbo, key, value)
+                    stagnation_count = state.get("stagnation_count", 0)
+                    exploration_restarts = state.get("exploration_restarts", 0)
+                    exploration_pending = state.get("exploration_pending", False)
+                    if (isinstance(stagnation_count, bool) or
+                            not isinstance(stagnation_count, int) or stagnation_count < 0):
+                        raise ValueError("invalid stagnation_count in checkpoint")
+                    if (isinstance(exploration_restarts, bool) or
+                            not isinstance(exploration_restarts, int) or exploration_restarts < 0):
+                        raise ValueError("invalid exploration_restarts in checkpoint")
+                    if not isinstance(exploration_pending, bool):
+                        raise ValueError("invalid exploration_pending in checkpoint")
+                    self.stagnation_count = stagnation_count
+                    self.exploration_restarts = exploration_restarts
+                    self.exploration_pending = exploration_pending
                     restored = True
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 self._log(tr("checkpoint unavailable; rebuilding from history: %s") % exc)
         if not restored:
-            draws = max(len(self.X) - 1, 0)
+            self.stagnation_count = 0
+            self.exploration_restarts = 0
+            self.exploration_pending = False
+            seed_count = len(self.initial_points) if self.initial_points else 0
+            draws = max(len(self.X) - 1 - seed_count, 0)
             if draws > self.sobol.num_generated:
                 self.sobol.fast_forward(draws - self.sobol.num_generated)
             feasible = [y for y, f in zip(self.y, self.feasible_mask()) if f]
@@ -247,6 +349,12 @@ class Engine:
         cfg = {"space": self.space.params, "fixed": self.fixed,
                "objective": self.obj.to_cfg(), "constraints": [vars(c) for c in self.cons],
                "seed": self.seed, "batch": self.batch, "n_init": self.n_init}
+        # Keep the old signature for the default configuration so checkpoints
+        # written before seed support remain resumable.
+        if self.initial_points:
+            cfg["initial_points"] = self.initial_points
+        if self.stagnation_rounds:
+            cfg["stagnation_rounds"] = self.stagnation_rounds
         return hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
 
     def _key(self, params):
@@ -255,6 +363,59 @@ class Engine:
     def _space_exhausted(self):
         return all(p.get("integer") for p in self.space.params) and len(self._seen) >= math.prod(
             math.floor(p["hi"]) - math.ceil(p["lo"]) + 1 for p in self.space.params)
+
+    @staticmethod
+    def _constraint_scale(constraint):
+        if constraint.kind == "band":
+            scale = max(abs(constraint.target), abs(constraint.tol))
+        else:
+            scale = abs(constraint.bound)
+        return scale if math.isfinite(scale) and scale > 0 else 1.0
+
+    def _progress_metric(self):
+        """Return the best objective, or the best normalized violation so far."""
+        feasible = self.feasible_mask()
+        objective_values = [y for y, is_feasible in zip(self.y, feasible)
+                            if is_feasible and y is not None and math.isfinite(y)]
+        if objective_values:
+            return "objective", max(objective_values)
+
+        violations = []
+        for ok, values in zip(self.ok, self.C):
+            if not ok or values is None:
+                continue
+            total = 0.0
+            for value, constraint in zip(values, self.cons):
+                total += max(float(value), 0.0) / self._constraint_scale(constraint)
+            if math.isfinite(total):
+                violations.append(total)
+        if violations:
+            return "violation", min(violations)
+        return None, None
+
+    @staticmethod
+    def _progress_improved(before, after):
+        before_kind, before_value = before
+        after_kind, after_value = after
+        if after_kind is None:
+            return False
+        if before_kind is None:
+            return True
+        if after_kind == "objective":
+            return before_kind != "objective" or after_value > before_value
+        return before_kind == "violation" and after_value < before_value
+
+    def _update_stagnation(self, before):
+        if not self.stagnation_rounds:
+            return
+        if self._progress_improved(before, self._progress_metric()):
+            self.stagnation_count = 0
+            return
+        self.stagnation_count += 1
+        if (self.stagnation_count >= self.stagnation_rounds and
+                not self.exploration_pending):
+            self.exploration_pending = True
+            self._log(tr("-- stagnation threshold reached; global Sobol exploration queued --"))
 
     def feasible_mask(self):
         return [o and c is not None and all(v <= 0 for v in c)
@@ -284,7 +445,10 @@ class Engine:
                 "last_ok": bool(self.ok and self.ok[-1]),
                 "last_feasible": bool(self.ok and self.feasible_mask()[-1]),
                 "status": self.status, "budget": self.budget,
-                "tr_length": self.turbo.length}
+                "tr_length": self.turbo.length,
+                "stagnation_count": self.stagnation_count,
+                "exploration_restarts": self.exploration_restarts,
+                "exploration_pending": self.exploration_pending}
 
     # ---------- model / proposal (same as optclient) ----------
     def _worst_objective(self):
@@ -330,8 +494,20 @@ class Engine:
 
     def propose(self, batch=None):
         batch = self.batch if batch is None else batch
+        if self.stop_event.is_set():
+            return [], False
         if self._space_exhausted():
             return [], False
+        if self.exploration_pending:
+            points = self._unique_candidates([], batch)
+            if not points:
+                return [], False
+            self.turbo.restart()
+            self.exploration_restarts += 1
+            self.exploration_pending = False
+            self.stagnation_count = 0
+            self._log(tr("-- restarting trust region for global Sobol exploration --"))
+            return points, False
         if not any(self.ok):
             self._log(tr("no valid metrics yet; continuing Sobol exploration"))
             return self._unique_candidates([], batch), False
@@ -369,10 +545,25 @@ class Engine:
 
     def initialize(self, budget=None):
         target = self.n_init if budget is None else min(self.n_init, budget)
+        if self.initial_points:
+            seen = set(self._seen)
+            pending_keys = {self._key(point) for point in self.initial_points}
+            pending = sum(key not in seen for key in pending_keys)
+            nominal = {**self.fixed,
+                        **self.space.to_physical(self.space.nominal_unit())}
+            nominal_key = self._key(nominal)
+            if nominal_key not in seen and nominal_key not in pending_keys:
+                pending += 1
+            target = max(target, len(self.X) + pending)
+            if budget is not None:
+                target = min(budget, target)
         need = target - len(self.X)
         if need <= 0:
             return
-        initial = [{**self.fixed, **self.space.to_physical(self.space.nominal_unit())}] if not self.X else []
+        initial = list(self.initial_points)
+        if self.initial_points or not self.X:
+            initial.append({**self.fixed,
+                            **self.space.to_physical(self.space.nominal_unit())})
         pts = self._unique_candidates(initial, need)
         for k in range(0, len(pts), self.batch):
             if self.stop_event.is_set():
@@ -390,6 +581,7 @@ class Engine:
 
     def step(self, batch=None):
         t0 = time.time()
+        before_progress = self._progress_metric()
         plist, used_dkl = self.propose(batch)
         if self.stop_event.is_set() or not plist:
             return False
@@ -403,6 +595,7 @@ class Engine:
         if self.turbo.needs_restart:
             self.turbo.restart()
             self._log(tr("-- trust region collapsed, restarting --"))
+        self._update_stagnation(before_progress)
         s = self.summary()
         head = self.obj.headline_metric()
         bh = "-"
@@ -464,7 +657,10 @@ class Engine:
             turbo["best_value"] = None
         self._atomic_json(os.path.join(self.outdir, "state.json"), {
             "signature": self._signature(), "n": len(self.X),
-            "sobol_draws": self.sobol.num_generated, "turbo": turbo})
+            "sobol_draws": self.sobol.num_generated, "turbo": turbo,
+            "stagnation_count": self.stagnation_count,
+            "exploration_restarts": self.exploration_restarts,
+            "exploration_pending": self.exploration_pending})
         self.export_history(os.path.join(self.outdir, "history.csv"))
 
     @staticmethod

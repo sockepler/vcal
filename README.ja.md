@@ -64,6 +64,42 @@ Python ≥ 3.10 と SPICE シミュレータ(HSpice/Spectre)が PATH に必要�
 `check` は設定の構造、参照ファイル、素子、パラメータ範囲、指標の参照だけを
 検証します。波形式の構文や実際のシミュレーションは検証しません。
 
+## OTA ワークフロー：gm/Id、scope、レビュー
+
+全体の手順は [`docs/OTA_WORKFLOW.md`](docs/OTA_WORKFLOW.md) を参照してください。
+GUI の gm/Id パネルは既存の NPZ/CSV LUT を読み込みます。リポジトリの合成テーブルは
+フロー確認用で、PDK データを含みません。
+
+```bash
+./vcal gmid examples/gmid_demo.csv \
+  --length 180n --vds 0.6 --vsb 0 --gmid 15 --id 20u --json
+```
+
+CLI ではパラメータのグループ確認、1 つの sub-cell scope の実行、履歴のオフライン
+レビューができます。
+
+```bash
+./vcal scopes <circuit.yaml> --json
+./vcal run <circuit.yaml> --scope <scope-name> \
+  --stagnation-rounds 6 --initial-points points.json --budget 100
+./vcal review <history.jsonl> --config <circuit.yaml> --json
+```
+
+`--scope` を省略すると、すべての有効なパラメータを最適化します。scope を指定すると、
+`devices` の全エントリがその scope に属するパラメータだけが有効になり、共有パラメータと
+選択していない scope のパラメータには、CLI では設定の固定値／公称値、GUI では初期値欄の
+値を使います。`--initial-points` は物理 SI
+値のマッピングを並べた JSON リスト、`--stagnation-rounds` は全体探索をキューに入れる
+までの停滞ラウンド数（0 以上）です。GUI の流れは、gm/Id LUT を開く → 幅/長さの対応
+パラメータを選ぶ → 計算結果を初期値として適用 → scope を選ぶ → 既存設定で最適化を開始
+→ `review` で履歴を確認、です。
+
+`params.devices` の `scope/instance` は subcircuit master 内の素子を指します。その master
+を変更すると、同じ master の全インスタンスに影響します。scope の選択で新しい刺激や
+テストベンチは生成されず、シミュレーションは設定済みのネットリストと既存の testbench
+を使います。このバージョンは PDK LUT や OTA AC テストベンチを自動生成しません。合成 LUT
+とここでの例は、実際の Spectre テストや性能を示すものではありません。
+
 ### 表示言語
 
 GUI 上部の言語プルダウンで中国語・日本語・英語を即時に切り替えられます。

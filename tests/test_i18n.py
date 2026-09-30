@@ -82,7 +82,7 @@ class LanguageTests(LanguageEnvironment, unittest.TestCase):
                 if "{language}" in source:
                     fields = lambda text: [p[1] for p in formatter.parse(text) if p[1]]
                     self.assertEqual(fields(source), fields(translation))
-        for filename in ("gui.py", "__main__.py", "engine.py", "proposer.py"):
+        for filename in ("gui.py", "gmid_gui.py", "__main__.py", "engine.py", "proposer.py"):
             tree = ast.parse((root / filename).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -90,7 +90,7 @@ class LanguageTests(LanguageEnvironment, unittest.TestCase):
                 name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
                 offset = {"tr": 0, "_tr": 0, "_format": 0, "_set_status": 0,
                           "_text_widget": 1, "_text_property": 2,
-                          "_form_row": 1, "_tab": 2}.get(name)
+                          "_form_row": 1, "_tab": 2, "_text": 1}.get(name)
                 if offset is None or len(node.args) <= offset:
                     continue
                 arg = node.args[offset]
