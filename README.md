@@ -61,8 +61,9 @@ CLI 选项：`--budget N` 总评估数（不会超过 N）、`--batch q` 并行�
 ## 通用电路指标
 
 GUI 的 **Circuit metrics** 页面可编辑 transient 的 stop/maxstep、Spectre DC
-的 source/start/stop/step，以及指标表达式。它提供 24 个建立时间、DC gain、FFT、
-DNL/INL、功率和能量模板；模板或自定义指标通过校验并应用后，才会出现在目标
+的 source/start/stop/step，以及指标表达式和每项测量的开始／结束时间。它提供
+28 个建立时间、DC gain、脉宽、占空比、抖动、保持下垂、误差和功耗模板；
+模板或自定义指标通过校验并应用后，才会出现在目标
 和约束选择器中，已被目标或约束引用的指标不能直接删除。`tran`、`dc` 可以单独配置
 或同时配置；指标值可为旧字符串，也可写成 `{analysis: dc, expr: "..."}`。完整签名、单位和边界见
 [`docs/METRICS.md`](docs/METRICS.md)；配置到应用的流程见
@@ -73,17 +74,19 @@ tran: {stop: 200n, maxstep: 50p}
 dc: {source: VBIAS, start: 0, stop: 1.8, step: 10m}
 metrics:
   gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
-  settle: {analysis: tran, expr: "settle_time(V('out'), start=0, end=200n, final=1.0)"}
-  sndr: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0)"
+  settle:
+    analysis: tran
+    window: {start: 50n, end: 200n}
+    expr: "settle_time(V('out'), final=1.0, initial=0, atol=1m)"
 constraints:
   - {metric: settle, max: 20n}
 ~~~
 
 `settle_time` 默认未建立即失败；要保留窗口长度，必须显式使用
-`on_unsettled: window` 并加 `settled(...) == 1` 约束。FFT 的 fund 是 bin 而非
-Hz。`adc_static(method='histogram')` 只用于完整均匀 ramp code-density，
-`adc_transitions` 要求完整转换边界，`decode_bits` 接收可由
-`np.column_stack` 构成的 `(samples, bits)` 波形。
+`on_unsettled='window'` 并加 `settled(...) == 1` 约束。所有瞬态模板支持独立
+时间窗，DC 没有时间轴、按扫描范围测量。窗口裁剪先于表达式求值，早期启动过程
+不会混入结果；波形范围不足、周期不完整或未建立会明确报错。旧 FFT／ADC API
+继续兼容已有 YAML，详见 [兼容接口说明](docs/LEGACY_ADC_METRICS.md)。
 
 ## 可选 gm/Id 与 scope 辅助
 
@@ -95,7 +98,7 @@ CLI/GUI 先检查一个 sub-cell 范围。合成演示表不含 PDK 数据：
 ~~~
 
 这些功能不自动生成 PDK LUT、OTA AC testbench 或新的激励。当前优先级是通用
-tran/dc、FFT、ADC 静态和功耗/能量测量；OTA 专用平台属于可选远期方向。
+内部模块的 tran/dc、时序、误差和功耗/能量测量；OTA 专用平台属于可选远期方向。
 
 ### 界面语言
 

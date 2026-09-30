@@ -136,6 +136,14 @@ class MeasurementConfigValidationTests(unittest.TestCase):
                           "stop": 1, "step": 0.1}
         self.assert_valid(dc_only)
 
+    def test_metric_window_is_checked_against_configured_stop(self):
+        config = copy.deepcopy(self.base)
+        config["metrics"]["voltage"] = {
+            "expr": "avg(V('out'))", "window": {"start": "100n", "end": "900n"}}
+        self.assert_valid(config)
+        config["metrics"]["voltage"]["window"]["end"] = "2u"
+        self.assert_invalid(config, "within tran.stop")
+
 
 if __name__ == "__main__":
     unittest.main()

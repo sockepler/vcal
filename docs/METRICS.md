@@ -1,8 +1,8 @@
 # 通用电路指标指南
 
 vcal 把仿真结果先转换成带有分析类型的波形数据，再在这些波形上计算一个
-有限的实数指标。这样同一套表达式可以用于建立时间、直流增益、ADC 动态
-性能、静态线性度、功耗和组合 FoM。指标计算本身是 NumPy 数值代码；它不
+有限的实数指标。同一套表达式可用于放大级、比较器、采样保持、时钟和偏置
+等内部模块的建立时间、直流增益、时序、误差及功耗。指标计算本身是 NumPy 数值代码；它不
 生成 testbench，也不替代 Spectre 对模型和电路的验证。
 
 ## 1. 配置分析和指标
@@ -37,7 +37,7 @@ constraints:
 指标表达式和常用模板；保存信号列表以空格分隔。点击“应用测量与分析”后，
 指标才会出现在目标和约束选择器中；保存配置将保留这些修改。
 
-指标值可以是字符串，也可以是只含 "expr"、"analysis" 的映射。表达式支持
+指标值可以是字符串，也可以是包含 "expr"、"analysis" 和可选 "window" 的映射。表达式支持
 工程后缀（如 50p、1.8、20u）和用 m["name"] 引用另一个指标。定义会
 自动按依赖排序；未知指标、循环依赖、未配置的分析和不允许的语法在仿真前
 报告。每个最终结果必须是有限的实标量；数组、字典和 inf 必须先选取字段
@@ -108,23 +108,23 @@ vmax(x, t0=None, t1=None)
 vmin(x, t0=None, t1=None)
 pp(x, t0=None, t1=None)
 slice(x, t0, t1)
-sample(x, fs, nsamp, t0=0.0, method="linear")
+sample(x, fs, nsamp, t0=None, method="linear")
 
 cross(x, level, edge="rising", nth=1, start=None, end=None)
-rise_time(x, start=0, end=None, low=.1, high=.9, initial=None, final=None)
-fall_time(x, start=0, end=None, low=.1, high=.9, initial=None, final=None)
+rise_time(x, start=None, end=None, low=.1, high=.9, initial=None, final=None)
+fall_time(x, start=None, end=None, low=.1, high=.9, initial=None, final=None)
 delay(x, y, level_x, level_y, edge_x="rising", edge_y="rising",
-      nth=1, start=None, end=None)
-slew_rate(x, start=0, end=None, low=.1, high=.9,
+      nth=1, start=None, end=None, pairing="causal")
+slew_rate(x, start=None, end=None, low=.1, high=.9,
           initial=None, final=None)
 
-settle_time(x, start=0, end=None, tol=.005, final=None, atol=None,
+settle_time(x, start=None, end=None, tol=.005, final=None, atol=None,
             initial=None, hold=0, on_unsettled="raise")
-settled(x, start=0, end=None, tol=.005, final=None, atol=None,
+settled(x, start=None, end=None, tol=.005, final=None, atol=None,
         initial=None, hold=0, on_unsettled="raise")
-settling_error(x, start=0, end=None, final=None,
+settling_error(x, start=None, end=None, final=None,
                relative=False, initial=None)
-overshoot(x, start=0, end=None, initial=None, final=None)
+overshoot(x, start=None, end=None, initial=None, final=None)
 
 dc_gain(y, x=None, at=None, start=None, end=None)
 dc_offset(y, x=None, start=None, end=None)
@@ -132,211 +132,166 @@ dc_offset(y, x=None, start=None, end=None)
 
 rise_time、fall_time 和 slew_rate 以 low/high 定义初始到最终步幅的
 比例，默认 10% 到 90%。cross 的 edge 可以是 rising 或 falling，
-nth 从 1 开始。delay 是 y 的 crossing time 减去 x 的 crossing time。
+nth 从 1 开始。`cross` 返回绝对交越时刻；恰好在窗口边界的交越计一次，
+阈值平台以首次到达阈值的时刻计，触碰阈值后回到同侧不计交越。
+`delay` 默认将第 nth 个输入沿配给其后、下一个同向输入沿之前的第一个输出沿。
+缺少该周期输出沿会报错，不借用前一周期或后一周期的边沿。
+如确实需要有符号的第 nth 输入／输出沿之差，显式使用 `pairing="ordinal"`。
+上升／下降时间会跳过未完成的早期毛刺，用首个完整转换的低、高阈值交越。
+有振铃、多次交越时应收紧窗口并明确阈值；软件不会猜测哪个毛刺是真实事件。
 
 settle_time 默认 on_unsettled="raise"：窗口结束前没有进入并保持误差带
 时，指标失败；只有明确选择 on_unsettled="window" 才会返回整个窗口长度。
 若用这种保留有限值的模式，必须同时加入 settled(...) == 1 的约束，否则
 优化器可能把“未建立”当成可行的建立时间。没有给出 atol 时，误差带是
 tol * abs(final - initial)；一旦给出 atol，它就是输出单位的绝对带宽并覆盖
-tol。ADC 的半 LSB 目标应把 atol 明确写成 0.5 * Vref / 2**bits。
+tol。例如 ±1 mV 建立误差可写成 `atol=1m`。
 
 dc_gain(y, x=None) 在没有 at 时对所选 DC 曲线作最小二乘斜率；有 at
 时返回该点所在相邻采样段的局部斜率。x=None 时使用分析轴。dc_offset
 返回相同线性拟合的截距。DC 输入必须严格单调且有非零范围。
 
-## 3. FFT 动态指标
+## 3. 从指定时刻开始测量
 
-Waves 上的便捷包装是：
+GUI 为每个指标提供“开始时间 (s)”和“结束时间 (s)”。可输入 `5u`、`20n`
+等工程数值，空白端点使用保存波形的对应边界。YAML 对应：
+
+~~~yaml
+metrics:
+  settling_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "settle_time(V('out'), final=1, initial=0, atol=1m, hold=1u)"
+  ripple_v:
+    analysis: tran
+    window: {start: 9u, end: 10u}
+    expr: "pp(V('out'))"
+  comparator_delay_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "delay(V('in'), V('out'), level_x=0, level_y=.5)"
+  supply_power_w:
+    analysis: tran
+    window: {start: 5u}  # 到已保存波形末尾
+    expr: "avg(-V('vdd') * I('VDD'))"
+~~~
+
+窗口在表达式求值**之前**裁剪全部信号，`V`、`I`、`np`、`t` 和 `axis`
+都只看到所选区间，端点不在原采样点上时线性插值。时间轴保留绝对仿真时间。
+因此 `cross(...)` 返回绝对时刻，`settle_time(...)` 返回距本次窗口开始的
+建立用时，`delay`、脉宽和周期返回两沿间的时间差；不能混用这几种含义。
+
+所有默认时间参数为 `None`，表示当前指标窗口边界；`sample` 默认从窗口首点
+重新采样。公式中已有的 `start/end` 或 `t0/t1` 可进一步缩小窗口；如果超出
+该指标窗口会报错。旧 YAML 不加 `window` 时仍读取全段数据，旧显式时间参数
+保持可用。模板里的时间是可修改的例子，需要配合实际激励选择。
+
+每项指标独立选窗，`m['name']` 引用的是另一个指标按其自身窗口得到的标量。
+例如可引用 DC 增益确定瞬态最终值。改变窗口会改变测量签名并隔离旧历史。
+窗口负数、反向、未知字段、超出 `tran.stop` 会在预检时拒绝；实际波形提前
+结束或保存范围不足，在求值时拒绝。空窗口、单时刻窗口不能用于周期或积分。
+
+**DC 扫描没有仿真时间轴。** DC 行禁用时间栏，`window` 用于 DC 会被拒绝。
+`dc_gain(..., start=-10m, end=10m)` 的范围是扫描源数值，`at=0` 是输入值。
+若需要在某个时刻之后估计准静态斜率，可对明确的单调瞬态输入窗口使用
+`dc_gain(V('out'), V('in'))`，但动态滞后会进入该结果，不能当作 DC 扫描增益。
+
+## 4. 内部模块补充指标
 
 ~~~python
-enob(x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs)
-sndr(x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs)
-snr(x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs)
-thd(x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs)
-sfdr(x, fs, fund, nsamp, t0_lo=None, t0_hi=None, nphase=48, **kwargs)
+pulse_width(x, level, polarity="high", nth=1, start=None, end=None)
+period(x, level, edge="rising", start=None, end=None)
+frequency(x, level, edge="rising", start=None, end=None)
+duty_cycle(x, level, start=None, end=None)
+period_jitter(x, level, edge="rising", start=None, end=None)
+cycle_jitter(x, level, edge="rising", start=None, end=None)
+slope(x, start=None, end=None)
+value_at_cross(x, trigger, level, edge="rising", nth=1, start=None, end=None)
 ~~~
 
-它们固定 fs 和 nsamp 后采样 x，然后分别取 spectrum 返回字典中的
-一个字段。fund 是 FFT bin，不是 Hz；若已知频率 f，应使用
-fund = f * nsamp / fs。没有显式相位区间时，默认使用固定 t0（未给出
-t0 时为波形轴起点），不会自动寻找最佳采样相位。
+设阈值交越时刻为 `e_i`，同向边沿间隔为 `T_i=e_(i+1)-e_i`：
 
-历史上显式传入 t0_lo 和 t0_hi 会在两者之间取 nphase 个采样起点，
-默认选择最佳结果并发出 RuntimeWarning。这是兼容模式；可以传
-phase_mode="worst" 选择最差相位，或者传 phase_mode="best" 明确保留旧
-行为。固定相位使用 phase_mode="fixed"（只给一个 t0）。对 thd，数值
-越大越差；对 enob/sndr/snr/sfdr，数值越小越差。
+| 指标 | 本实现的数值定义 | 窗口要求 |
+| --- | --- | --- |
+| 脉宽 | 高脉冲上升→下降的时间差；`polarity='low'` 则相反 | nth 只计窗内完整脉冲；窗首／尾的半脉冲不计 |
+| 周期 | `mean(T_i)` | 至少两个同向边沿 |
+| 频率 | `1/mean(T_i)`，不是各周期频率的均值 | 至少两个同向边沿 |
+| 占空比 | 完整上升沿→上升沿周期内，高时间总和／周期总时长 | 至少一个完整周期，返回 0–1 |
+| 周期抖动 | `sqrt(mean((T_i-mean(T_i))**2))` | 至少两个周期，使用总体标准差 |
+| 周期间抖动 | `sqrt(mean((T_(i+1)-T_i)**2))` | 至少两个相邻周期 |
+| 保持下垂率 | `slope`：分段线性波形按时间加权的最小二乘斜率 | 选择进入保持模式后的窗口；V/s，有符号 |
+| 触发时读数 | 在 trigger 第 nth 个指定方向的阈值交越时刻插值读取 x | 交越必须在窗口内；输出单位同 x |
+| 跟踪误差 RMS | `rms(V('out')-V('in'))` | 选择跟踪模式的窗口，V |
+| 峰值跟踪误差 | `vmax(abs(V('out')-V('in')))` | 选定窗口，V |
+| 峰值电流 | `vmax(abs(I('VDD')))` | 选定窗口，A |
+| 电荷 | `integ(-I('VDD'))` | 选定窗口，C；核对电流方向 |
 
-底层纯 NumPy API 是：
+边沿、脉宽、占空比的术语依据 [Tektronix TDSJIT2 手册附录 A](https://download.tek.com/manual/071081402.pdf)。
+vcal 明确采用上表的聚合方式；改变窗口可能改变所含周期的数量，抖动不是只有
+一个周期时的“0”。振荡器相位噪声、随机抖动需来自相应仿真或测量数据，普通
+确定性 tran 不会自动加入噪声。
 
-~~~python
-spectrum(samples, fs, fund, window="rect", harmonics=5, bin_width=None)
-~~~
+保持下垂、采集时间、保持切换误差适用于采样保持内部模块，参考
+[ADI AN-1515](https://www.analog.com/en/resources/app-notes/an-1515.html)。
+采集时间可用绝对误差带的 `settle_time`，保持切换误差可在切换前后分别用
+`at` 或 `avg` 得到标量再相减；下垂用保持区间的 `slope`。拟合斜率按时间
+加权，自适应采样点变密不会改变同一分段线性波形的拟合结果。
 
-返回 sndr、snr、thd、sfdr、enob 以及信号/噪声/失真功率、选中的
-fundamental/harmonic bins 等元数据。thd 和 sfdr 是 dBc，enob 使用
-(sndr - 1.76) / 6.02。计算会先去除记录均值，再进行加窗；Rect 窗要求整数
-bin 并只计基波单 bin。周期 Hann 允许浮点 bin，默认积分基波和谐波的 ±2
-bin 主瓣，SFDR 也按最强 spur 的主瓣积分（Rect 仍为单 bin）。单边谱会保留
-Nyquist bin 的原始能量，不会把 DC 算入噪声。谐波折叠到 [0, fs/2] 后去重；
-基波和谐波测量带重叠时明确报错。记录少于 16 点、fund 在 DC/Nyquist、零
-AC 能量或常量波形也报错。
+比较器可用 `value_at_cross(V('in'), V('out'), .5)` 测输出翻转时输入电压，
+分别选择上升和下降输入扫描估算阈值差。该数值包含输入斜率与传播延迟的影响；
+应声明过驱动、输出负载及门限，参见
+[ADI 比较器传播延迟测量条件](https://www.analog.com/en/resources/technical-articles/parameters-that-affect-comparator-propagation-delay-measurements.html)。
 
-非相干 Hann 测量中，主瓣外的旁瓣残留仍计入噪声，因此窗口本身可能限制
-可测 SNDR。高分辨率验证优先使用相干采样；改变记录长度或 `bin_width` 后
-检查结果稳定性，不能把任意 Hann 结果当成 ADC 的真实噪声底。
+## 5. 模板逐项覆盖与验证
 
-表达式环境中 fft_metrics 直接映射到 spectrum，所以可选取字段：
+GUI 提供 28 个内部模块模板：25 个瞬态指标均可设开始／结束时间，3 个 DC
+指标使用扫描范围。模板仅是可编辑公式，不为任意电路自动选择激励或规格。
 
-~~~yaml
-metrics:
-  sndr: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0, window='hann')"
-  # 或者先采样，再使用返回字典
-  enob: "fft_metrics(sample(V('adc_out'), 1G, 256, t0=0), 1G, 7)['enob']"
-~~~
+| 模板名称 | 是否可从指定时刻开始 | 数值验证依据 |
+| --- | --- | --- |
+| settling_s、settling_abs_s、settled_ok、settling_error_v | 是 | 明确初始值、最终值及误差带的阶跃 |
+| rise_s、fall_s、slew_v_s、overshoot_ratio | 是 | 已知斜率、阈值与峰值的波形 |
+| delay_s | 是 | 已知输入／输出沿；晚开始不配错周期 |
+| ripple_vpp、noise_rms_v | 是 | 峰峰值与时间加权 RMS 的解析值 |
+| power_w、energy_j、peak_current_a、charge_c | 是 | 已知电压、电流和积分时长 |
+| pulse_width_s、period_s、frequency_hz、duty_ratio | 是 | 已知交越时刻的完整脉冲和周期 |
+| period_jitter_s、cycle_jitter_s | 是 | 已知变化周期序列及其标准差／RMS差 |
+| droop_v_s | 是 | 线性保持下垂及非均匀采样 |
+| trigger_value_v | 是 | 已知触发交越位置及待测输入斜率 |
+| tracking_rms_v、tracking_peak_v | 是 | 已知输出输入之差 |
+| dc_gain_v_v、dc_gain_db、dc_offset_v | 无时间轴；设置扫描范围 | 已知线性传输及偏移；时间窗须拒绝 |
 
-理想闭式波形可能使 snr/sfdr 为 inf；目标指标仍必须有真实噪声或其他
-有限误差，使最终结果可被 compute_metrics 接受。FFT 指标只描述所选窗口、
-采样率、记录长度和带宽，不能直接等同于完整 OTA 的增益带宽或稳定性。
+`tests/test_metric_windows.py` 对每个模板执行独立期望值、窗口前后污染及时间
+整体平移检查，并验证非采样端点、单边界、非法窗口和旧格式兼容。
+`tests/test_measurement_edges.py` 检查阈值边界、前一周期输出、缺少响应与毛刺。
+GUI 测试覆盖保存／加载窗口、DC 时间栏和中日英切换。
 
-## 4. ADC 静态和 bit 解码
+[RC 参考配置](../examples/metrics_rc/rc.yaml) 可直接在 GUI 打开，包含 tran+DC
+和跨分析指标依赖。验证夹具使用理想无源元件及已知源波形，不依赖 PDK；它验证
+测量软件的数值与时间窗口行为，不代表用户内部模块已通过器件模型或 PVT 验证。
 
-静态测量明确区分两种输入：
+[时序／保持参考配置](../examples/metrics_blocks/blocks.yaml) 包含早期不规则脉冲，
+将测量窗口设为 5–10 μs；延迟项从 5.25 μs 开始，刻意落在前一输入及其输出
+之间。本地 Spectre 23.1 在 10 ns／5 ns 两个最大步长下的结果如下：
 
-~~~python
-adc_static(codes, bits, stimulus="ramp", method="endpoint")
-code_density(codes, bits, stimulus="ramp")
-transition_metrics(transitions, bits, *, ideal_step=1.0, ideal_start=0.0)
-decode(bits, threshold=0.5, msb_first=True)
-~~~
+| 测量 | 独立预期 | Spectre 结果（10 ns／5 ns） |
+| --- | --- | --- |
+| 延迟 | 150 ns | 150／150 ns |
+| 脉宽 | 400 ns | 400／400 ns |
+| 平均周期 | 1.025 μs | 1.025／1.025 μs |
+| 频率 | 975609.7561 Hz | 975609.7561／975609.7561 Hz |
+| 占空比 | 0.4/1.025 | 0.3902439024／0.3902439024 |
+| 周期／周期间抖动 | 25／50 ns | 两步长均为 25／50 ns |
+| 保持斜率 | −2000 V/s | −2000／−2000 V/s |
+| 触发时读数 | 0.785 V | 0.785／0.785 V |
+| 平均功率 | 1.8 mW | 1.8／1.8 mW |
+| RC 1% 建立时间 | 2.303085 μs | 2.303019／2.303071 μs |
+| RC 上升时间 | 1.098612 μs | 1.098565／1.098599 μs |
+| RC DC 增益／偏移 | 0.5 V/V、0 V | 两步长均为 0.5 V/V、0 V |
 
-adc_static(..., method="histogram") 或 code_density 把 codes 当作完整均匀
-ramp 的 ADC 输出码，返回 counts、dnl、inl、dnl_peak、inl_peak、
-missing_codes。DNL 和 INL 以 LSB 为单位；直方图模式不能从没有已知激励
-范围的样本推断绝对 offset/gain，因此这两个字段为 None。样本数至少为
-2**bits，必须覆盖 code 0 和最大 code；端点数量相对内部中位数过高时会拒绝，
-以避免端点饱和把采样噪声当作线性度。缺少内部码会列在 missing_codes，但
-未覆盖端点或样本量不足是测量范围/激励错误，应先修正 ramp。
+四次仿真均为 0 errors、0 warnings，原始波形完成时间、有限性、严格递增性及
+最大采样间隔均检查通过；时间量的步长减半差异低于预先规定的 0.1%。
+夹具中的抖动由已知源边沿序列注入，用来核验统计公式，不是器件随机噪声仿真。
 
-adc_static 默认的 method="endpoint" 和 transition_metrics 只接受完整的
-2**bits + 1 个转换边界（含两端外边界）。边界允许非递减；零宽度才表示
-missing code，某个 code 宽于一个 LSB 本身不再额外计为 missing code。端点
-模式使用测量范围定义 LSB：LSB = (last - first) / 2**bits，DNL 是
-width / LSB - 1，INL 是相对于连接两端点直线的归一化边界偏差，inl 数组
-包含全部 2**bits + 1 个边界。这个归一化结果不从端点数组推导绝对 offset/gain；
-若请求单独的参考 offset/gain 误差，ideal_step 和 ideal_start 只用于该参考。
-内部阈值数组不会被自动外推成伪全码结果。
-
-decode 接收形状为 (samples, bits) 的二维 bit 波形，每一列长度相同；
-msb_first=True 时第一列是 MSB，返回无符号整数码。波形必须有限，ragged
-数组、空列和非法阈值拒绝。表达式中可用
-decode_bits(np.column_stack((V('b2'), V('b1'), V('b0'))), threshold=.5)；
-再以 sample(..., method='previous') 在声明的有效采样时刻提取整数码，才用于
-adc_static(..., method="histogram")。不能直接统计自适应瞬态时间点；这些点的
-时间间隔不同，会扭曲码密度。输入必须来自覆盖完整范围的均匀 ramp。
-
-## 5. 可复用指标例子
-
-下面的例子只依赖波形和配置，不假设某个 PDK。
-
-### ADC 半 LSB 建立时间
-
-~~~yaml
-metrics:
-  adc_settle: >-
-    settle_time(V('adc_in'), start=0, end=2u, final=0.9,
-                atol=0.5*0.9/2**12, on_unsettled='raise')
-  adc_settled: >-
-    settled(V('adc_in'), start=0, end=2u, final=0.9,
-            atol=0.5*0.9/2**12)
-constraints:
-  - {metric: adc_settled, min: 1}
-~~~
-
-adc_settle 的单位是秒，adc_settled 是 0/1。实际 ADC 的 LSB、参考范围、
-采样保持时间和输入噪声必须一起定义；若噪声本身超过半 LSB，应复核指定带宽内
-的噪声与误差预算，不能把未建立波形标记为通过。
-
-### DC 增益和 offset
-
-~~~yaml
-metrics:
-  gain_vv: {analysis: dc, expr: "dc_gain(V('out'), V('in'))"}
-  offset_v: {analysis: dc, expr: "dc_offset(V('out'), V('in'))"}
-~~~
-
-gain_vv 是 V/V；若需要 dB，写成
-20*log10(abs(m['gain_vv']))，并把它作为依赖指标或直接表达式。
-
-### FFT 动态指标
-
-~~~yaml
-metrics:
-  sndr_db: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=0)"
-  enob: "enob(V('adc_out'), 1G, 7, 256, t0=0)"
-~~~
-
-### DNL/INL
-
-以下是独立的完整均匀 ramp 测试；时钟为 1 MHz，示例采样相位为 10 μs。
-采样窗口必须位于所有 bit 都有效的转换输出中，并保证均匀覆盖全码范围。
-
-~~~yaml
-metrics:
-  dnl_peak: >-
-    adc_static(sample(decode_bits(np.column_stack((V('b2'), V('b1'), V('b0')))),
-                      fs=1M, nsamp=4096, t0=10u, method='previous'),
-               3, method='histogram')['dnl_peak']
-  inl_peak: >-
-    adc_static(sample(decode_bits(np.column_stack((V('b2'), V('b1'), V('b0')))),
-                      fs=1M, nsamp=4096, t0=10u, method='previous'),
-               3, method='histogram')['inl_peak']
-~~~
-
-至少一个样本/码只是最低输入检查，不保证统计精度；应增加采样数量并验证结果
-稳定。missing_codes 返回未观察到的码，激励和样本量不足时不能据此断言硬件缺码。
-
-### 功率、能量和 ADC FoM
-
-以下另用已建立的单音动态测试；示例 fs=1 GHz、测量带宽 BW=500 MHz，
-输出波形和功耗在同一观察窗口测量。按实际测试替换窗口、频点、fs 和 BW。
-
-~~~yaml
-metrics:
-  sndr_db: "sndr_fft(V('adc_out'), 1G, 7, 256, t0=10u)"
-  enob_bits: "(m['sndr_db'] - 1.76) / 6.02"
-  power_w: "avg(-V('vdd') * I('VDD'), 10u, 10.256u)"
-  energy_j: "integ(-V('vdd') * I('VDD'), 10u, 10.001u)"
-  walden_fj: "1e15 * m['power_w'] / (2**m['enob_bits'] * 1G)"
-  schreier_db: "m['sndr_db'] + 10*log10(500M / m['power_w'])"
-objective: {metric: walden_fj, goal: minimize}
-constraints: [{metric: sndr_db, min: 60}]
-~~~
-
-power_w 为 W，energy_j 为每次转换的 J；电流符号和正功耗由实际 testbench
-确认。Walden FoM 的单位为 fJ/conversion-step，越低越好；Schreier FoM
-越高越好。过采样 ADC 的实际信号带宽不能直接用 fs/2 代替。
-
-## 6. 验证边界和参考
-
-功能测试使用闭式波形、合成 ADC 码和明确的端点/噪声限制，验证 API、单位
-和失败条件。另用手写的理想 RC 分压夹具做了本地 Spectre 23.1 的 tran+DC
-验证：R1=R2=1 kΩ、C=1 nF，增益 0.5 V/V、偏移 0 V；1% 建立时间
-2.303019 μs（maxstep=10 ns）和 2.303071 μs（5 ns），解析值 2.303085 μs。
-两个步长均为 0 errors、0 warnings；步长减半的建立时间变化约 0.0023%。
-这是通用测量后端验证；ADC 指标以合成数据验证，真实 ADC 仍需在目标模型、
-负载、参考源、采样时序和 PVT 条件下复核。
-
-[RC 参考配置](../examples/metrics_rc/rc.yaml) 可在 GUI 中直接打开；不需要 PDK。
-它使用 DC 增益作为瞬态最终电平，演示不同分析间的指标依赖。名义参数下的
-预期值见上文；调整 R1 后最终电平和时间常数随之改变。也可用
-`./vcal check examples/metrics_rc/rc.yaml --json` 做无仿真预检。
-
-- [Analog Devices MT-003](https://www.analog.com/media/en/training-seminars/tutorials/MT-003.pdf)：SINAD、SNR、THD、SFDR 和 ENOB 的 FFT 定义。
-- [Analog Devices MT-010](https://www.analog.com/media/en/training-seminars/tutorials/MT-010.pdf)：ADC 静态指标、LSB、DNL 和 INL 的背景。
-- [Advanced Integrated Circuits: Oversampling and Sigma-Delta ADCs](https://analogicus.com/aic2024/2024/02/16/Lecture-6-Oversampling-and-Sigma-Delta-ADCs.html)：Walden 和 Schreier FoM 定义。
-- [Texas Instruments SLYT262A](https://www.ti.com/lit/an/slyt262a/slyt262a.pdf)：以 ADC LSB 误差带定义建立时间，并说明采样驱动测量条件。
-- [Texas Instruments SBAA535](https://www.ti.com/lit/an/sbaa535/sbaa535.pdf)：半 LSB 模拟建立时间和噪声/参考范围限制的工程注意事项。
-
-这些资料用于定义术语和测量边界；vcal 的数值实现独立编写。
+旧 FFT、ADC 静态和解码函数继续支持已有配置，详见
+[兼容接口说明](LEGACY_ADC_METRICS.md)。

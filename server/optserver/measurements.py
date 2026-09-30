@@ -95,7 +95,7 @@ class WaveMeasurements:
         events = []
         i = 0
         n = len(d)
-        while i < n - 1:
+        while i < n:
             if d[i] == 0:
                 j = i
                 while j + 1 < n and d[j + 1] == 0:
@@ -119,12 +119,12 @@ class WaveMeasurements:
                     elif before > 0:
                         direction = "falling"
                 if direction == edge:
-                    # Entering a level plateau is the unique crossing.  At
-                    # the right edge of a window, use its last sample.
-                    events.append(float(ts[i] if after is not None else ts[j]))
+                    # A threshold plateau is one event at its arrival, even
+                    # if it extends to the right boundary of the window.
+                    events.append(float(ts[i]))
                 i = j + 1
                 continue
-            if d[i] * d[i + 1] < 0:
+            if i + 1 < n and ((d[i] < 0 < d[i + 1]) or (d[i] > 0 > d[i + 1])):
                 direction = "rising" if d[i] < 0 else "falling"
                 if direction == edge:
                     frac = -d[i] / (d[i + 1] - d[i])
@@ -141,7 +141,7 @@ class WaveMeasurements:
                              % (nth, edge, float(level)))
         return events[nth - 1]
 
-    def _transition(self, x, start=0.0, end=None, low=.1, high=.9,
+    def _transition(self, x, start=None, end=None, low=.1, high=.9,
                     initial=None, final=None, kind="transition"):
         low, high = self._levels(low, high)
         ts, xs = self._window_data(x, start, end, min_points=2)
@@ -156,17 +156,19 @@ class WaveMeasurements:
         low_events = self._cross_times(x, low_level, edge, start, end)
         if not low_events:
             raise ValueError("waveform has no %s low-level crossing" % kind)
-        t_low = low_events[0]
-        high_events = [t for t in self._cross_times(x, high_level, edge, start, end)
-                       if t > t_low]
-        if not high_events:
+        for t_high in self._cross_times(x, high_level, edge, start, end):
+            index = int(np.searchsorted(low_events, t_high, side="left")) - 1
+            if index >= 0:
+                # Skip an incomplete early glitch; use the latest low crossing.
+                t_low = low_events[index]
+                break
+        else:
             raise ValueError("waveform has no ordered %s high-level crossing" % kind)
-        t_high = high_events[0]
         if not t_high > t_low:
             raise ValueError("%s crossing interval must be positive" % kind)
         return ts, xs, initial, final, t_low, t_high
 
-    def rise_time(self, x, start=0, end=None, low=.1, high=.9,
+    def rise_time(self, x, start=None, end=None, low=.1, high=.9,
                   initial=None, final=None):
         ts, xs, initial, final, t_low, t_high = self._transition(
             x, start, end, low, high, initial, final, "rise_time")
@@ -174,7 +176,7 @@ class WaveMeasurements:
             raise ValueError("rise_time requires final greater than initial")
         return float(t_high - t_low)
 
-    def fall_time(self, x, start=0, end=None, low=.1, high=.9,
+    def fall_time(self, x, start=None, end=None, low=.1, high=.9,
                   initial=None, final=None):
         ts, xs, initial, final, t_low, t_high = self._transition(
             x, start, end, low, high, initial, final, "fall_time")
@@ -183,13 +185,31 @@ class WaveMeasurements:
         return float(t_high - t_low)
 
     def delay(self, x, y, level_x, level_y, edge_x="rising", edge_y="rising",
-              nth=1, start=None, end=None):
-        nth = self._nth(nth)
-        tx = self.cross(x, level_x, edge_x, nth, start, end)
-        ty = self.cross(y, level_y, edge_y, nth, start, end)
-        return float(ty - tx)
+              nth=1, start=None, end=None, pairing="causal"):
+        """Delay from the nth input edge to its following output response.
 
-    def slew_rate(self, x, start=0, end=None, low=.1, high=.9,
+        A response must precede the next input edge of the same direction.
+        ``pairing='ordinal'`` preserves signed nth-to-nth edge subtraction.
+        """
+        nth = self._nth(nth)
+        if pairing not in ("causal", "ordinal"):
+            raise ValueError("pairing must be 'causal' or 'ordinal'")
+        inputs = self._cross_times(x, level_x, edge_x, start, end)
+        outputs = self._cross_times(y, level_y, edge_y, start, end)
+        if len(inputs) < nth:
+            raise ValueError("delay has fewer than %d input crossings" % nth)
+        tx = inputs[nth - 1]
+        if pairing == "ordinal":
+            if len(outputs) < nth:
+                raise ValueError("delay has fewer than %d output crossings" % nth)
+            return float(outputs[nth - 1] - tx)
+        next_input = inputs[nth] if nth < len(inputs) else math.inf
+        responses = [t for t in outputs if tx <= t < next_input]
+        if not responses:
+            raise ValueError("delay has no causal output crossing before the next input or window end")
+        return float(responses[0] - tx)
+
+    def slew_rate(self, x, start=None, end=None, low=.1, high=.9,
                   initial=None, final=None):
         _, _, initial, final, t_low, t_high = self._transition(
             x, start, end, low, high, initial, final, "slew_rate")
@@ -216,7 +236,7 @@ class WaveMeasurements:
         integral = np.sum(np.diff(tail_t) * (tail_x[:-1] + tail_x[1:]) * .5)
         return float(integral / (tail_t[-1] - tail_t[0]))
 
-    def _settle_data(self, x, start=0, end=None, final=None, initial=None,
+    def _settle_data(self, x, start=None, end=None, final=None, initial=None,
                      tol=.005, atol=None, hold=0):
         tol = self._finite(tol, "tol")
         if tol < 0:
@@ -235,12 +255,12 @@ class WaveMeasurements:
         step = abs(final - initial)
         if step == 0 and (atol is None or atol == 0):
             raise ValueError("settle_time requires a nonzero step or positive atol")
-        # An explicit absolute error band (e.g. half an ADC LSB) must not be
+        # An explicit absolute error band must not be
         # widened by the default relative tolerance.
         band = tol * step if atol is None else atol
         return ts, xs, initial, final, band, hold
 
-    def settle_time(self, x, start=0, end=None, tol=.005, final=None,
+    def settle_time(self, x, start=None, end=None, tol=.005, final=None,
                     atol=None, initial=None, hold=0, on_unsettled="raise"):
         mode = self._on_unsettled(on_unsettled)
         ts, xs, initial, final, band, hold = self._settle_data(
@@ -274,7 +294,7 @@ class WaveMeasurements:
             raise ValueError("waveform did not remain settled for hold duration")
         return float(settle_at - ts[0])
 
-    def settled(self, x, start=0, end=None, tol=.005, final=None,
+    def settled(self, x, start=None, end=None, tol=.005, final=None,
                 atol=None, initial=None, hold=0, on_unsettled="raise"):
         self._on_unsettled(on_unsettled)
         # Validate the numerical arguments outside the unsettled exception
@@ -287,7 +307,7 @@ class WaveMeasurements:
             return 0
         return 1
 
-    def settling_error(self, x, start=0, end=None, final=None,
+    def settling_error(self, x, start=None, end=None, final=None,
                        relative=False, initial=None):
         ts, xs = self._window_data(x, start, end, min_points=2)
         initial = float(xs[0]) if initial is None else self._finite(initial, "initial")
@@ -301,7 +321,7 @@ class WaveMeasurements:
             error /= step
         return error
 
-    def overshoot(self, x, start=0, end=None, initial=None, final=None):
+    def overshoot(self, x, start=None, end=None, initial=None, final=None):
         ts, xs = self._window_data(x, start, end, min_points=2)
         initial = float(xs[0]) if initial is None else self._finite(initial, "initial")
         final = (self._weighted_tail(ts, xs) if final is None

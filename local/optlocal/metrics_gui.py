@@ -1,7 +1,7 @@
 """Generic analysis and scalar measurement editor for the local optimizer."""
 import copy
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
                              QHeaderView, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QTableWidget, QTableWidgetItem,
@@ -65,10 +65,12 @@ class MetricsPanel(QWidget):
         self.description = QLabel()
         self.description.setWordWrap(True)
         layout.addWidget(self.description)
-        self.table = QTableWidget(0, 3)
+        self.table = QTableWidget(0, 5)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         layout.addWidget(self.table, 1)
         actions = QHBoxLayout()
         for label, handler in (("Add custom metric", self.add_empty),
@@ -94,7 +96,15 @@ class MetricsPanel(QWidget):
             widget.setText(tr(source))
         self.tran_box.setTitle(tr("Transient analysis"))
         self.dc_box.setTitle(tr("DC source sweep (Spectre)"))
-        self.table.setHorizontalHeaderLabels([tr("Metric name"), tr("Analysis"), tr("Expression")])
+        self.table.setHorizontalHeaderLabels([
+            tr("Metric name"), tr("Analysis"), tr("Expression"),
+            tr("Start time (s)"), tr("End time (s)"),
+        ])
+        for column in (3, 4):
+            header = self.table.horizontalHeaderItem(column)
+            if header is not None:
+                header.setToolTip(tr(
+                    "Window bounds are absolute simulation time; blank uses the available range; DC uses the sweep range."))
         for index, item in enumerate(self.catalog):
             self.templates.setItemText(index, tr(item["title"]))
         self._describe()
@@ -119,23 +129,54 @@ class MetricsPanel(QWidget):
         default = "tran" if self.tran_box.isChecked() else "dc"
         for name, definition in cfg.get("metrics", {}).items():
             if isinstance(definition, str):
-                self._row(name, default, definition)
+                self._row(name, default, definition, None)
             else:
-                self._row(name, definition.get("analysis", default), definition.get("expr", ""))
+                self._row(name, definition.get("analysis", default),
+                          definition.get("expr", ""), definition.get("window"))
 
-    def _row(self, name, analysis, expr):
+    def _row(self, name, analysis, expr, window=None):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(name))
         combo = QComboBox()
         combo.addItems(["tran", "dc"])
-        combo.setCurrentText(analysis)
+        combo.currentTextChanged.connect(self._analysis_changed)
         self.table.setCellWidget(row, 1, combo)
         item = QTableWidgetItem(expr)
         item.setToolTip(expr)
         self.table.setItem(row, 2, item)
+        raw_window = window if isinstance(window, dict) else {}
+        self.table.setItem(row, 3, QTableWidgetItem(
+            "" if raw_window.get("start") is None else str(raw_window.get("start"))))
+        self.table.setItem(row, 4, QTableWidgetItem(
+            "" if raw_window.get("end") is None else str(raw_window.get("end"))))
+        combo.setCurrentText(analysis)
+        self._set_row_window_state(combo)
         self.table.setCurrentCell(row, 2)
         self.table.scrollToItem(item)
+
+    def _analysis_changed(self, _analysis):
+        combo = self.sender()
+        if isinstance(combo, QComboBox):
+            self._set_row_window_state(combo)
+
+    def _set_row_window_state(self, combo):
+        row = next((index for index in range(self.table.rowCount())
+                    if self.table.cellWidget(index, 1) is combo), None)
+        if row is None:
+            return
+        enabled = combo.currentText() == "tran"
+        for column in (3, 4):
+            item = self.table.item(row, column)
+            if item is None:
+                continue
+            if not enabled:
+                item.setText("")
+            flags = item.flags()
+            if enabled:
+                item.setFlags(flags | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+            else:
+                item.setFlags(flags & ~(Qt.ItemIsEnabled | Qt.ItemIsEditable))
 
     def add_template(self):
         item = self.catalog[self.templates.currentIndex()]
@@ -143,7 +184,7 @@ class MetricsPanel(QWidget):
         name, suffix = item["name"], 2
         while name in used:
             name, suffix = item["name"] + "_" + str(suffix), suffix + 1
-        self._row(name, item["analysis"], item["expr"])
+        self._row(name, item["analysis"], item["expr"], item.get("window"))
 
     def add_empty(self):
         self._row("", "tran" if self.tran_box.isChecked() else "dc", "")
@@ -166,7 +207,17 @@ class MetricsPanel(QWidget):
             expr = self.table.item(row, 2).text().strip()
             if not name or name in definitions:
                 raise ValueError(tr("Metric names must be nonempty and unique."))
-            definitions[name] = {"analysis": self.table.cellWidget(row, 1).currentText(), "expr": expr}
+            analysis = self.table.cellWidget(row, 1).currentText()
+            definition = {"analysis": analysis, "expr": expr}
+            if analysis == "tran":
+                window = {}
+                for column, key in ((3, "start"), (4, "end")):
+                    value = self.table.item(row, column).text().strip()
+                    if value:
+                        window[key] = value
+                if window:
+                    definition["window"] = window
+            definitions[name] = definition
         validate_metric_definitions(definitions, analyses)
         return {"metrics": definitions, "analyses": analyses,
                 "save": self.save_signals.text().split()}

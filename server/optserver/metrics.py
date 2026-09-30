@@ -12,10 +12,11 @@ import warnings
 import numpy as np
 
 from .measurements import WaveMeasurements
+from .block_measurements import BlockMeasurements
 from .metricexpr import (expand_literals as _expand_literals, prepare_definitions,
                          validate_metric_definitions)
 
-MEASUREMENT_VERSION = 2
+MEASUREMENT_VERSION = 3
 
 
 def measurement_signature(defs, analyses, save=()):
@@ -40,7 +41,7 @@ def _count(value, name, minimum=1):
     return int(parsed)
 
 
-class Waves(WaveMeasurements):
+class Waves(BlockMeasurements, WaveMeasurements):
     def __init__(self, t, sigs, analysis="tran"):
         if np.iscomplexobj(t) or any(np.iscomplexobj(v) for v in sigs.values()):
             raise ValueError("waveform axis and signals must be real")
@@ -104,6 +105,15 @@ class Waves(WaveMeasurements):
         lo, hi = self._range(t0, t1)
         return (self.t >= lo) & (self.t <= hi)
 
+    def windowed(self, start=None, end=None):
+        """Restrict all signals and the absolute axis before evaluating a metric."""
+        lo, hi = self._range(start, end)
+        if not lo < hi:
+            raise ValueError("measurement window requires a positive duration")
+        axis = np.concatenate(([lo], self.t[(self.t > lo) & (self.t < hi)], [hi]))
+        return Waves(axis, {name: np.interp(axis, self.t, values)
+                            for name, values in self.sigs.items()}, self.analysis)
+
     def at(self, x, tq):
         point = _finite(tq, "sample location")
         self._range(point, point)
@@ -143,12 +153,12 @@ class Waves(WaveMeasurements):
     def slice(self, x, t0, t1):
         return self._vector(x)[self._win(t0, t1)]
 
-    def sample(self, x, fs, nsamp, t0=0.0, method="linear"):
+    def sample(self, x, fs, nsamp, t0=None, method="linear"):
         fs = _finite(fs, "sample rate")
         if fs <= 0:
             raise ValueError("sample rate must be positive")
         count = _count(nsamp, "sample count")
-        times = _finite(t0, "sampling start") + np.arange(count) / fs
+        times = (self.t[0] if t0 is None else _finite(t0, "sampling start")) + np.arange(count) / fs
         self._range(times[0], times[-1])
         values = self._vector(x)
         if method == "linear":
@@ -205,7 +215,9 @@ class Waves(WaveMeasurements):
         functions = {name: getattr(self, name) for name in (
             "V", "I", "avg", "rms", "vmax", "vmin", "at", "slice", "pp", "integ", "std",
             "cross", "rise_time", "fall_time", "delay", "slew_rate", "settle_time", "settled",
-            "settling_error", "overshoot", "dc_gain", "dc_offset", "sample", "enob")}
+            "settling_error", "overshoot", "dc_gain", "dc_offset", "sample", "enob",
+            "pulse_width", "period", "frequency", "duty_cycle", "period_jitter",
+            "cycle_jitter", "slope", "value_at_cross")}
         return {"__builtins__": {}, "np": np, "abs": abs, "min": min, "max": max,
                 "float": float, "int": int, "round": round, "len": len, "sum": sum,
                 "log10": math.log10, "log": math.log, "sqrt": math.sqrt,
@@ -223,11 +235,18 @@ def compute_metrics(defs, t=None, sigs=None, *, datasets=None, default_analysis=
         data.setdefault(default_analysis, (t, sigs))
     entries = prepare_definitions(defs, data, default_analysis)
     waves = {key: Waves(*values, analysis=key) for key, values in data.items()}
-    environments = {key: value.environment() for key, value in waves.items()}
+    environments = {}
     out = {}
     for name, entry in entries.items():
         try:
-            env = environments[entry["analysis"]]
+            window = entry["window"]
+            key = (entry["analysis"], None if window is None else tuple(sorted(window.items())))
+            if key not in environments:
+                wave = waves[entry["analysis"]]
+                if window is not None:
+                    wave = wave.windowed(**window)
+                environments[key] = wave.environment()
+            env = environments[key]
             env["m"] = out
             with np.errstate(divide="raise", invalid="raise", over="raise", under="ignore"):
                 value = eval(entry["code"], env)  # noqa: S307 -- numerical AST validated above.

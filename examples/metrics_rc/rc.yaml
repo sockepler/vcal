@@ -14,8 +14,14 @@ params:
   - {name: resistance, devices: [R1], attr: r, lo: 500, hi: 2000}
 metrics:
   # m['gain'] is evaluated first even though it is declared below.
-  settle_s: "settle_time(V('out'), start=1u, end=10u, final=m['gain'], initial=0, tol=.01, hold=1u)"
-  rise_s: "rise_time(V('out'), start=1u, end=10u, initial=0, final=m['gain'])"
+  settle_s:
+    analysis: tran
+    window: {start: 1u, end: 10u}
+    expr: "settle_time(V('out'), final=m['gain'], initial=0, tol=.01, hold=1u)"
+  rise_s:
+    analysis: tran
+    window: {start: 1u, end: 10u}
+    expr: "rise_time(V('out'), initial=0, final=m['gain'])"
   gain: {analysis: dc, expr: "dc_gain(V('out'), V('in'), at=0)"}
   offset_v: {analysis: dc, expr: "dc_offset(V('out'), V('in'))"}
 objective: {metric: settle_s, goal: minimize, scale: 1e-6}

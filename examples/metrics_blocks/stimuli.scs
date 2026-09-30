@@ -1,0 +1,6 @@
+simulator lang=spectre
+VIN (in 0) vsource type=pwl wave=[0u 0 0.99u 0 1.01u 1 1.79u 1 1.81u 0 5.19u 0 5.21u 1 5.59u 1 5.61u 0 6.19u 0 6.21u 1 6.59u 1 6.61u 0 7.24u 0 7.26u 1 7.64u 1 7.66u 0 8.24u 0 8.26u 1 8.64u 1 8.66u 0 9.29u 0 9.31u 1 9.69u 1 9.71u 0 12u 0]
+VOUT (out 0) vsource type=pwl wave=[0u 0 1.14u 0 1.16u 1 1.94u 1 1.96u 0 5.34u 0 5.36u 1 5.74u 1 5.76u 0 6.34u 0 6.36u 1 6.74u 1 6.76u 0 7.39u 0 7.41u 1 7.79u 1 7.81u 0 8.39u 0 8.41u 1 8.79u 1 8.81u 0 9.44u 0 9.46u 1 9.84u 1 9.86u 0 12u 0]
+VRAMP (ramp 0) vsource type=pwl wave=[0u 0.25 12u 1.45]
+VHOLD (held 0) vsource type=pwl wave=[0u 0 1u 2 2u 0 5u 1 10u 0.99 11u 2 12u 0]
+VDD (vdd 0) vsource dc=1.8

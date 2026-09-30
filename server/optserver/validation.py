@@ -140,7 +140,7 @@ def validate_config(cfg):
     else:
         try:
             from .metricexpr import validate_metric_definitions
-            validate_metric_definitions(metrics, analyses)
+            validate_metric_definitions(metrics, {name: cfg[name] for name in analyses})
         except ValueError as exc:
             errors.append(str(exc))
     obj = cfg.get("objective")

@@ -1,0 +1,4 @@
+// Handwritten numerical measurement fixture, not a user circuit or PDK model.
+simulator lang=spectre
+RLOAD (out 0) resistor r=1k
+RPOWER (vdd 0) resistor r=1.8k

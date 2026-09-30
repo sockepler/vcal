@@ -1,0 +1,56 @@
+# Ideal source/load fixture for window and numerical API verification, no PDK.
+name: internal_module_measurements
+simulator: spectre
+netlist: signals.scs
+stimuli: stimuli.scs
+tran: {stop: 12u, maxstep: 10n}
+spectre: {engine: '', mt: 1, timeout_s: 60}
+tb_extra: ['accuracy options reltol=1e-6 vabstol=1e-9 iabstol=1e-12']
+save: [in, out, ramp, held, vdd, 'VDD:p']
+keep_raw: true
+params:
+  - {name: load, devices: [RLOAD], attr: r, lo: 500, hi: 2000}
+metrics:
+  pulse_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "pulse_width(V('out'), .5)"
+  period_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "period(V('out'), .5)"
+  frequency_hz:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "frequency(V('out'), .5)"
+  duty:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "duty_cycle(V('out'), .5)"
+  period_jitter_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "period_jitter(V('out'), .5)"
+  cycle_jitter_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "cycle_jitter(V('out'), .5)"
+  droop_v_s:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "slope(V('held'))"
+  triggered_v:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "value_at_cross(V('ramp'), V('out'), .5)"
+  delay_s:
+    analysis: tran
+    # First output in this window belongs to the preceding input pulse.
+    window: {start: 5.25u, end: 10u}
+    expr: "delay(V('in'), V('out'), .5, .5)"
+  power_w:
+    analysis: tran
+    window: {start: 5u, end: 10u}
+    expr: "avg(-V('vdd') * I('VDD'))"
+objective: {metric: power_w, goal: minimize}
+constraints: [{metric: delay_s, max: 200n}]

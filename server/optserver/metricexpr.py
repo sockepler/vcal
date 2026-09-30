@@ -4,6 +4,8 @@ import io
 import math
 import tokenize
 
+from .netlist import parse_num
+
 SUFFIXES = {"T": 1e12, "G": 1e9, "M": 1e6, "meg": 1e6, "K": 1e3,
             "k": 1e3, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12,
             "f": 1e-15, "a": 1e-18}
@@ -13,6 +15,8 @@ FUNCTIONS = {
     "cross", "rise_time", "fall_time", "delay", "slew_rate", "settle_time", "settled",
     "settling_error", "overshoot", "dc_gain", "dc_offset", "sample", "enob", "sndr_fft",
     "snr_fft", "thd_fft", "sfdr_fft", "fft_metrics", "adc_static", "adc_transitions", "decode_bits",
+    "pulse_width", "period", "frequency", "duty_cycle", "period_jitter", "cycle_jitter",
+    "slope", "value_at_cross",
 }
 NUMPY_NAMES = {
     "abs", "absolute", "min", "max", "mean", "std", "sum", "sqrt", "square", "diff",
@@ -94,6 +98,28 @@ def parse_expression(expr):
     return compile(tree, "<metric>", "eval"), dependencies
 
 
+def _measurement_window(raw, analysis, analyses):
+    if not isinstance(raw, dict) or not raw or set(raw) - {"start", "end"}:
+        raise ValueError("window must contain start and/or end")
+    if analysis != "tran":
+        raise ValueError("time window requires tran; DC uses a sweep range")
+    window = {}
+    for key, value in raw.items():
+        parsed = None if isinstance(value, bool) else parse_num(value)
+        if parsed is None or not math.isfinite(parsed) or parsed < 0:
+            raise ValueError("window.%s must be a finite nonnegative time" % key)
+        window[key] = parsed
+    if window.get("start", 0) >= window.get("end", math.inf):
+        raise ValueError("window.start must be smaller than window.end")
+    tran = analyses.get("tran") if isinstance(analyses, dict) else None
+    if isinstance(tran, dict):
+        stop = parse_num(tran.get("stop"))
+        if stop is not None and math.isfinite(stop) and stop > 0:
+            if window.get("start", 0) >= stop or window.get("end", stop) > stop:
+                raise ValueError("measurement window must lie within tran.stop")
+    return window
+
+
 def prepare_definitions(defs, analyses=None, default_analysis=None):
     """Normalize and dependency-sort expressions before starting jobs."""
     if not isinstance(defs, dict) or not defs:
@@ -103,14 +129,17 @@ def prepare_definitions(defs, analyses=None, default_analysis=None):
     entries, errors = {}, []
     for name, raw in defs.items():
         try:
+            window = None
             if not isinstance(name, str) or not name.strip():
                 raise ValueError("metric name must be a nonempty string")
             if isinstance(raw, str):
                 expr, analysis = raw, default
-            elif isinstance(raw, dict) and set(raw) <= {"expr", "analysis"}:
+            elif isinstance(raw, dict) and set(raw) <= {"expr", "analysis", "window"}:
                 expr, analysis = raw.get("expr"), raw.get("analysis", default)
+                if "window" in raw:
+                    window = _measurement_window(raw["window"], analysis, analyses)
             else:
-                raise ValueError("definition must be an expression or {expr, analysis}")
+                raise ValueError("definition must be an expression or {expr, analysis, window?}")
             if not isinstance(expr, str) or not expr.strip():
                 raise ValueError("expression must be a nonempty string")
             if analysis not in available:
@@ -120,7 +149,7 @@ def prepare_definitions(defs, analyses=None, default_analysis=None):
             if missing:
                 raise ValueError("unknown referenced metric(s): " + ", ".join(sorted(missing)))
             entries[name] = {"expr": expr, "analysis": analysis, "code": code,
-                             "dependencies": dependencies}
+                             "dependencies": dependencies, "window": window}
         except (ValueError, TypeError, SyntaxError, tokenize.TokenError) as exc:
             errors.append("metric %r: %s" % (name, exc))
     if errors:
@@ -137,5 +166,6 @@ def prepare_definitions(defs, analyses=None, default_analysis=None):
 
 def validate_metric_definitions(defs, analyses=None, default_analysis=None):
     entries = prepare_definitions(defs, analyses, default_analysis)
-    return {name: {"expr": item["expr"], "analysis": item["analysis"]}
+    return {name: {"expr": item["expr"], "analysis": item["analysis"],
+                   **({"window": item["window"]} if item["window"] is not None else {})}
             for name, item in entries.items()}
